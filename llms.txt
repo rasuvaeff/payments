@@ -1,0 +1,156 @@
+# payments
+
+Install: `composer require rasuvaeff/payments`
+
+Rules: namespace `Rasuvaeff\Payments`. Money is integer minor units — never
+floats. `PaymentIntent` is application-owned; `PaymentAttempt`/`RefundAttempt`
+are single provider executions. `PaymentState::canTransitionTo()` is advisory
+only — never use it to discard an accepted webhook observation.
+`ObservedPaymentEvent` is a sanitized observation, not authoritative state;
+re-fetch authoritative provider state before changing a projection. Inject
+PSR-18/PSR-17 implementations; keep retries and timeouts outside the transport;
+never serialize or log `AuthContext` credentials. Validate a webhook before
+atomically claiming its provider event id. Never persist raw body or validation
+headers. Validation regexes anchor with `\z`, not `$`. `CreatePaymentRequest`
+takes an optional `paymentMethod`: omit it for the deferred flow where the
+customer picks a method client-side. Mount the webhook route before any
+body-parsing middleware — a consumed stream reads back empty and fails every
+signature check (reported as the `empty_body` outcome).
+
+Contracts API:
+
+```php
+$money = Money::minorUnits(1_200, 'EUR');   // non-negative int + /^[A-Z]{3}\z/ currency
+$money->add($m); $money->subtract($m);      // same currency; overflow/negative => throw
+$money->equals($other);                     // amount AND currency — use for order reconciliation
+$money->isGreaterThan($other); $money->isLessThan($other); // same currency required
+$money->multiply(3, 100);                   // integer numerator/denominator, half-up rounding
+$money->isZero();
+
+$provider = new PaymentProvider('stripe');  // /^[a-z][a-z0-9_-]{0,63}\z/
+$opId = new OperationId('op-1');            // app-issued command id, <=255 bytes
+$payment = new PaymentReference(provider: $provider, id: 'pi_1', kind: 'payment');
+$refund = new RefundReference(provider: $provider, id: 're_1');
+$customer = new CustomerReference(id: 'cus-app', providerId: 'cus_1');
+$method = new PaymentMethodReference(id: 'pm_1', kind: 'card');
+```
+
+- Enums: `PaymentState` (Pending, RequiresPaymentMethod, RequiresAction, RequiresCapture, Processing, Succeeded, Failed, Canceled; `canTransitionTo(self): bool` advisory, terminal states return false). `Succeeded`/`Failed`/`Canceled` are terminal, so a recoverable provider status must never map to them — Stripe's `requires_payment_method` maps to `RequiresPaymentMethod` because the same intent can still reach `succeeded`, `RefundState` (Pending, Succeeded, Failed, Canceled), `CaptureMethod`/`ConfirmationMethod` (Automatic, Manual).
+- `PaymentAttempt(operationId, provider, payment, amount, state, rawStatus, createdAt, updatedAt, requestInfo, ?failure, ?nextAction)`: one provider execution; reference provider must match, `updatedAt >= createdAt`.
+- `RefundAttempt(operationId, provider, refund, payment, requestedAmount, ?actualAmount, state, rawStatus, createdAt, updatedAt, requestInfo, ?failure)`.
+- `PaymentIntent(id, amount, createdAt, attempts)`: application aggregate; attempt currencies must match intent currency.
+- `PaymentFailure(code, ?message, retryable = false, details = [])`: sanitized, scalar details only.
+- `ProviderRequestInfo(receivedAt, ?requestId, ?rateLimitRemaining, ?retryAfterSeconds)`: allow-listed response diagnostics.
+- `NextAction` (open, `type(): string`): `RedirectToUrl($httpsUrl)`, `UseSdk($sdkName, $scalarPayload)`, `DisplayInstructions($instructionType, $text, $scalarMetadata)`.
+
+Gateway contracts (ISP — optional operations are separate interfaces):
+
+```php
+interface PaymentGatewayInterface {
+    public function provider(): PaymentProvider;
+    public function capabilities(): CapabilitySet;
+    public function createPayment(CreatePaymentRequest $request): PaymentAttempt;
+    public function retrievePayment(RetrievePaymentRequest $request): PaymentAttempt;
+}
+// CaptureGatewayInterface::capturePayment(CapturePaymentRequest): PaymentAttempt
+// ConfirmGatewayInterface::confirmPayment(PaymentOperationRequest): PaymentAttempt
+// CancelGatewayInterface::cancelPayment(PaymentOperationRequest): PaymentAttempt
+// RefundGatewayInterface::createRefund(CreateRefundRequest): RefundAttempt
+//                        ::retrieveRefund(RetrieveRefundRequest): RefundAttempt
+```
+
+- Requests: `CreatePaymentRequest(operationId, amount, paymentMethod, ?customer, captureMethod, confirmationMethod, ?description, metadata, ?idempotencyKey)`, `CapturePaymentRequest(operationId, payment, ?amount, ?idempotencyKey)`, `CreateRefundRequest(operationId, payment, ?amount, ?reason, ?idempotencyKey)`, `PaymentOperationRequest(operationId, payment, ?idempotencyKey)` for confirm/cancel, `RetrievePaymentRequest(operationId, payment)`, `RetrieveRefundRequest(operationId, refund)`.
+- Capabilities: `CapabilitySet::of(Capability ...)` (duplicate types rejected), `->get(Class::class): ?T`, `->has(Class::class): bool`, `->all(): list<Capability>`. Shipped: `PartialRefundCapability(?maximumRefunds)`, `SandboxCapability(environment = 'sandbox')`, `ThreeDsCapability(versions)`, `WebhookCapability(signatureRequired = true)`. Implement the `Capability` marker for custom ones.
+
+Registry and router:
+
+```php
+$registry = new GatewayRegistry([$gatewayA, $gatewayB]); // duplicate provider => InvalidArgumentException
+$registry->get($provider);       // OutOfBoundsException when missing
+$registry->has($provider); $registry->providers(); $registry->all();
+$registry->capability($provider, ThreeDsCapability::class); // ?ThreeDsCapability
+
+$router = new PaymentGatewayRouter(
+    registry: $registry,
+    selectionPolicy: new FixedGatewaySelectionPolicy($provider), // or app-owned GatewaySelectionPolicyInterface
+);
+$attempt = $router->createPayment(new GatewaySelectionContext(request: $create, tenantId: 't1', riskLevel: 'low'));
+$router->retrievePayment($retrieve);   // routes by $request->payment->provider
+$router->capturePayment($capture);     // LogicException if gateway lacks CaptureGatewayInterface
+$router->confirmPayment($op); $router->cancelPayment($op);
+$router->createRefund($refundReq); $router->retrieveRefund($retrieveRefund);
+```
+
+The policy selects a provider only for creation; existing references route by
+their embedded provider. No implicit default policy is shipped.
+
+Transport API:
+
+```php
+$request = (new JsonRequestBuilder($requestFactory, $streamFactory))
+    ->build('POST', $uri, $data, AuthContext::bearer($token));
+$payload = (new JsonResponseDecoder())->decode((new Psr18Transport($client))->send($request));
+```
+
+- `AuthContext::bearer($token)` / `::basic($user, $pass)` / `::fromHeaders($map)` — in-memory only.
+- `FormRequestBuilder` encodes scalar-only form bodies.
+- `JsonResponseDecoder` maps: 401 `UnauthorizedException`, 403 `ForbiddenException`, 404 `NotFoundException`, 429 `RateLimitedException`, 5xx `ServerException`, refund errors `RefundFailedException`, card/decline `ProviderDeclinedException`, other non-2xx `PaymentException`, non-object JSON `MalformedResponseException`. PSR-18 failures become `TransportException`. `PaymentException` carries `providerCode`, `providerType`, `providerParameter`, scalar `details`.
+
+Webhook API:
+
+- `RawJsonRequestBuilderInterface::buildRawJson(method, uri, body, auth)`: implemented by `JsonRequestBuilder`; sends an already-encoded JSON body byte for byte (throws on an empty body). Required when forwarding a document signed elsewhere — a decode/re-encode round trip escapes non-ASCII, turns `{}` into `[]` and drops a trailing zero, so the forwarded document stops being the received one.
+- `WebhookInput`: exact `rawBody`, provider, normalized headers and request metadata; use only sanitized accessors for audit data. `header()` requires a non-empty name.
+- `WebhookValidatorInterface::validate()`: native union return type `ValidWebhook|InvalidWebhook`. PHP rejects a widened signature and any other returned class, so the two outcomes are the whole contract.
+- `WebhookEventTypeExtractorInterface`: extracts the provider's raw event name after validation.
+- `WebhookEventRecognizerInterface`: maps a raw name to provider-neutral `ProviderEventType` or returns `null`.
+- `WebhookPayloadMapperInterface`: produces sanitized `ObservedPaymentEvent`; throw `UnsupportedWebhookEventException` for a known unsupported payload, `MalformedResponseException` for a payload that can never be mapped. Both are terminal — the claim is completed, not released — because redelivery yields the same verdict and a retry storm gets the endpoint disabled.
+- `ObservedPaymentEvent(providerEventId, type, payment, state, rawStatus, occurredAt, ?refund, payload)`: scalar allow-listed payload; refund reference required for `RefundState` and forbidden for `PaymentState`; all references must share one provider.
+- `WebhookEventStoreInterface`: atomic `claim(provider, eventId)`, `complete(provider, eventId)` when the event is durably accepted, `release(provider, eventId)` for retryable failures. `complete()` is what makes stale-claim recovery safe: a claim that was never completed and whose lease expired must be reclaimable, a completed one never. Without it a crash between claim and acceptance is answered with a replay outcome (204) forever and the event is lost silently. Alternative for a same-database queue: commit the claim row and the queue row in one transaction.
+- `QueuedWebhookEventAcceptance($queue)`: durable phase-one queue, policy `AfterValidation`.
+- `SynchronousWebhookEventAcceptance($reconciler)`: synchronous authoritative reconciliation, policy `AfterPersistence`.
+- `WebhookProcessingResult` is an open interface; `WebhookProcessor::process()` narrows to these six, a decorating processor may add its own:
+  - `ProcessedWebhook`: `$event` (`ObservedPaymentEvent`), `$acknowledgementPolicy`.
+  - `WebhookValidationFailed`: `$reason`.
+  - `UnknownWebhookEvent`: `$providerEventId`, `$providerEventType` (nullable).
+  - `UnsupportedWebhookEvent`: `$providerEventId`, `$type`, `$reason`.
+  - `RejectedWebhookEvent`: `$providerEventId`, `$reason`, `$type` (nullable) — validated event whose payload can never be mapped.
+  - `ReplayedWebhookEvent`: `$providerEventId`.
+
+```php
+$processor = new WebhookProcessor(
+    validator: $validator,
+    eventTypeExtractor: $extractor,
+    eventRecognizer: $recognizer,
+    payloadMapper: $mapper,
+    eventStore: $eventStore,
+    eventAcceptance: new QueuedWebhookEventAcceptance($queue),
+);
+$result = $processor->process(new WebhookInput($rawBody, $provider, $headers));
+
+if ($result instanceof ProcessedWebhook) {
+    $policy = $result->acknowledgementPolicy;
+    $event = $result->event;
+}
+```
+
+The queue must be idempotent by provider and event id. `ProcessedWebhook` is
+returned only after the configured durable boundary succeeds; retryable failures
+release the claim and propagate so the HTTP bridge can return a retryable
+non-success response. Every returned outcome — including the ignoring ones —
+completes the claim.
+
+Webhook HTTP endpoint:
+
+```php
+$registry = new WebhookProcessorRegistry([
+    new WebhookProcessorRegistration(provider: $provider, processor: $processor),
+]); // duplicate provider => InvalidArgumentException
+$controller = new WebhookController(registry: $registry, responseFactory: $psr17ResponseFactory);
+$response = $controller->handle($serverRequest, 'stripe'); // PSR-7
+```
+
+`WebhookController` responses carry only a status and an
+`X-Payments-Webhook-Outcome` header, never payloads or validation reasons:
+404 `provider_not_found`; 204 `processed`/`replayed`/`ignored_unknown`/`ignored_unsupported`/`rejected_payload`;
+400 `validation_failed`, 400 `empty_body`; 503 `processing_failed` on exception (retryable);
+500 `processing_failed` for a foreign result type.
