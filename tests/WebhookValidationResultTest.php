@@ -33,8 +33,8 @@ final class WebhookValidationResultTest
         $eventId = str_repeat('e', 255);
         $reason = str_repeat('r', 1_024);
 
-        Assert::same(new ValidWebhook(providerEventId: $eventId)->providerEventId, $eventId);
-        Assert::same(new InvalidWebhook(reason: $reason)->reason, $reason);
+        Assert::same((new ValidWebhook(providerEventId: $eventId))->providerEventId, $eventId);
+        Assert::same((new InvalidWebhook(reason: $reason))->reason, $reason);
     }
 
     public function rejectsEmptyEventId(): void
