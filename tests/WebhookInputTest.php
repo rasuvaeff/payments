@@ -64,6 +64,27 @@ final class WebhookInputTest
         ]);
     }
 
+    public function redactsVendorCredentialHeaders(): void
+    {
+        $input = new WebhookInput(
+            rawBody: '{}',
+            provider: new PaymentProvider(value: 'fixture'),
+            headers: [
+                'X-Amz-Credential' => 'AKIA/20260818/eu-central-1',
+                'X-Session-Id' => 'session-1',
+                'X-Vendor-Password' => 'hunter2',
+                'User-Agent' => 'provider-webhooks/1.0',
+            ],
+        );
+
+        Assert::same($input->sanitizedHeaders(), [
+            'x-amz-credential' => ['[REDACTED]'],
+            'x-session-id' => ['[REDACTED]'],
+            'x-vendor-password' => ['[REDACTED]'],
+            'user-agent' => ['provider-webhooks/1.0'],
+        ]);
+    }
+
     public function acceptsMaximumMetadataKeyLength(): void
     {
         $key = str_repeat('a', 128);
@@ -98,6 +119,7 @@ final class WebhookInputTest
         yield 'line feed injection' => [['x-value' => "value\ninjected"], []];
         yield 'header injection' => [['x-value' => "value\r\ninjected"], []];
         yield 'non-list header values' => [['x-value' => [1 => 'value']], []];
+        yield 'empty header value list' => [['x-value' => []], []];
         yield 'non-string header value' => [['x-value' => [1]], []];
         yield 'numeric metadata key' => [[], [0 => 'value']];
         yield 'empty metadata key' => [[], ['' => 'value']];

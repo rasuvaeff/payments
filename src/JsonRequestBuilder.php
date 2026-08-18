@@ -44,12 +44,12 @@ final readonly class JsonRequestBuilder implements RawJsonRequestBuilderInterfac
 
     private function withHeaders(RequestInterface $request, AuthContext $auth, string $contentType): RequestInterface
     {
-        $request = $request->withHeader('Content-Type', $contentType);
-
         foreach ($auth->headers() as $name => $value) {
             $request = $request->withHeader($name, $value);
         }
 
-        return $request;
+        // The media type is the builder's, not the caller's: an authentication
+        // context carrying Content-Type must not decide how the body is read.
+        return $request->withHeader('Content-Type', $contentType);
     }
 }

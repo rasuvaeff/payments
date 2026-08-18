@@ -49,12 +49,20 @@ final readonly class ObservedPaymentEvent
         Assert::nonEmpty(value: $rawStatus, name: 'Observed raw status', maximumLength: self::RAW_STATUS_MAXIMUM_LENGTH);
         Assert::scalarMap(value: $payload, name: 'Observed event payload');
 
-        if ($type->provider->value !== $payment->provider->value || ($refund instanceof RefundReference && $refund->provider->value !== $payment->provider->value)) {
-            throw new \InvalidArgumentException('Webhook references and event type must use the same provider');
+        if ($type->provider->value !== $payment->provider->value) {
+            throw new \InvalidArgumentException('Event type and payment reference must use the same provider');
         }
 
-        if ((!$refund instanceof RefundReference && $state instanceof RefundState) || ($refund instanceof RefundReference && $state instanceof PaymentState)) {
-            throw new \InvalidArgumentException('Refund state requires a refund reference and payment state forbids one');
+        if ($refund instanceof RefundReference && $refund->provider->value !== $payment->provider->value) {
+            throw new \InvalidArgumentException('Refund reference and payment reference must use the same provider');
+        }
+
+        if ($state instanceof RefundState && !$refund instanceof RefundReference) {
+            throw new \InvalidArgumentException('Refund state requires a refund reference');
+        }
+
+        if ($state instanceof PaymentState && $refund instanceof RefundReference) {
+            throw new \InvalidArgumentException('Payment state forbids a refund reference');
         }
 
         $this->providerEventId = $providerEventId;

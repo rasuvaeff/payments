@@ -64,7 +64,7 @@ final class ObservedPaymentEventTest
         Assert::same($event->refund?->id, 're_1');
     }
 
-    public function rejectsEmptyEventIdAndRawStatus(): void
+    public function rejectsEmptyEventId(): void
     {
         Expect::exception(\InvalidArgumentException::class);
         $this->event(providerEventId: '');
@@ -108,7 +108,7 @@ final class ObservedPaymentEventTest
         Assert::same(strlen($event->rawStatus), 255);
     }
 
-    public function rejectsReferenceAndStatusPastBoundaries(): void
+    public function rejectsEventIdPastBoundary(): void
     {
         Expect::exception(\InvalidArgumentException::class);
         $this->event(providerEventId: str_repeat('e', 256));

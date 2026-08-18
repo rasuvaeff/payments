@@ -11,5 +11,8 @@ namespace Rasuvaeff\Payments;
  */
 interface WebhookEventTypeExtractorInterface
 {
+    /**
+     * @return non-empty-string|null
+     */
     public function extract(WebhookInput $input): ?string;
 }

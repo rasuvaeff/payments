@@ -389,7 +389,11 @@ and request metadata accept only scalar, allow-listed values.
 `WebhookInput` keeps exact body bytes and validation headers in memory. Never
 log or serialize `rawBody`, `headers()` or unsanitized request metadata; use
 `sanitizedHeaders()` and `sanitizedRequestMetadata()` for short-lived audit
-records. Enforce a request-body size limit at the HTTP boundary. The durable
+records. Both redact by name against a denial list of credential classes
+(authorization, cookie, signature, secret, token, api key, credential,
+password, bearer, session, private) — it is a best-effort filter, not a
+guarantee: an unknown vendor prefix can still pass, so the logging policy stays
+yours. Enforce a request-body size limit at the HTTP boundary. The durable
 queue receives only `ObservedPaymentEvent`, whose payload must already be
 sanitized by the provider mapper.
 
