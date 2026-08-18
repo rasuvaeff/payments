@@ -97,13 +97,17 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           coverage: none
-          extensions: json, mbstring
+          extensions: json, mbstring, bcmath, intl
           tools: composer:v2
+
+      - name: Resolve the Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
 
       - name: Cache Composer dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: ~/.composer/cache
+          path: ${{ steps.composer-cache.outputs.dir }}
           key: composer-${{ runner.os }}-${{ hashFiles('**/composer.json') }}
           restore-keys: composer-${{ runner.os }}-
 
@@ -130,13 +134,17 @@ jobs:
         with:
           php-version: '8.3'
           coverage: none
-          extensions: json, mbstring
+          extensions: json, mbstring, bcmath, intl
           tools: composer:v2
+
+      - name: Resolve the Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
 
       - name: Cache Composer dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: ~/.composer/cache
+          path: ${{ steps.composer-cache.outputs.dir }}
           key: composer-${{ runner.os }}-${{ hashFiles('**/composer.json') }}
           restore-keys: composer-${{ runner.os }}-
 
@@ -163,13 +171,17 @@ jobs:
         with:
           php-version: '8.4'
           coverage: pcov
-          extensions: json, mbstring
+          extensions: json, mbstring, bcmath, intl
           tools: composer:v2
+
+      - name: Resolve the Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
 
       - name: Cache Composer dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: ~/.composer/cache
+          path: ${{ steps.composer-cache.outputs.dir }}
           key: composer-${{ runner.os }}-${{ hashFiles('**/composer.json') }}
           restore-keys: composer-${{ runner.os }}-
 
@@ -219,10 +231,14 @@ jobs:
           extensions: json, mbstring, bcmath, intl
           tools: composer:v2
 
+      - name: Resolve the Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
       - name: Cache Composer dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: ~/.composer/cache
+          path: ${{ steps.composer-cache.outputs.dir }}
           key: composer-${{ runner.os }}-${{ hashFiles('**/composer.json') }}
           restore-keys: composer-${{ runner.os }}-
 
@@ -256,7 +272,7 @@ jobs:
           if [ "$CODE" -eq 0 ]; then
             exit 0
           fi
-          NEXT="$(grep -m1 -oE '## [0-9]+\.[0-9]+\.[0-9]+' CHANGELOG.md | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+          NEXT="$(grep -m1 -oE '^## [0-9]+\.[0-9]+\.[0-9]+' CHANGELOG.md | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
           LATEST_MAJOR="${LATEST#v}"; LATEST_MAJOR="${LATEST_MAJOR%%.*}"
           NEXT_MAJOR="${NEXT%%.*}"
           # Only code 3 means "breaks detected". Anything else is roave itself

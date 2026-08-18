@@ -58,7 +58,9 @@ final class Assert
      */
     public static function matches(string $value, string $pattern, string $message): void
     {
-        if (preg_match($pattern, $value) !== 1) {
+        // The empty check is what makes the non-empty-string assertion sound:
+        // a pattern that accepts '' would otherwise widen the caller's type.
+        if ($value === '' || preg_match($pattern, $value) !== 1) {
             throw new \InvalidArgumentException($message);
         }
     }

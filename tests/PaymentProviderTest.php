@@ -19,9 +19,15 @@ final class PaymentProviderTest
         Assert::same((string) new PaymentProvider(value: 'pay-pal_2'), 'pay-pal_2');
     }
 
-    public function rejectsUppercaseAndEmptyKeys(): void
+    public function rejectsUppercaseKeys(): void
     {
         Expect::exception(\InvalidArgumentException::class);
         new PaymentProvider(value: 'Stripe');
+    }
+
+    public function rejectsEmptyKeys(): void
+    {
+        Expect::exception(\InvalidArgumentException::class);
+        new PaymentProvider(value: '');
     }
 }
