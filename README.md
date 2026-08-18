@@ -431,7 +431,18 @@ Webhook observations never update payment state directly:
 `PaymentState::canTransitionTo()` is advisory, and reconciliation must re-fetch
 authoritative provider state before persistence or event publication.
 `WebhookController` leaks nothing about validation internals to the caller —
-only a status code and an outcome token.
+only a status code and an outcome token. That opacity is also why the
+controller takes an optional PSR-3 logger: a `503 processing_failed` otherwise
+leaves no trace of its cause, and detection rests on whoever watches the 503
+rate.
+
+```php
+$controller = new WebhookController(
+    registry: $registry,
+    responseFactory: $responseFactory,
+    logger: $logger, // optional; the response contract does not change
+);
+```
 
 ## Examples
 

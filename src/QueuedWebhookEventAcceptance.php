@@ -22,6 +22,9 @@ final readonly class QueuedWebhookEventAcceptance implements WebhookEventAccepta
     #[\Override]
     public function accept(ObservedPaymentEvent $event): void
     {
-        $this->queue->enqueue(event: $event);
+        // Positional on purpose: the parameter name belongs to the
+        // implementation, and a named argument would break an implementor
+        // that calls it anything else.
+        $this->queue->enqueue($event);
     }
 }

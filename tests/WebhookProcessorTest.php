@@ -153,7 +153,7 @@ final class WebhookProcessorTest
         )->process(input: $this->input());
 
         Assert::instanceOf($result, ProcessedWebhook::class);
-        Assert::same($fixture->calls[4], 'recognize');
+        Assert::same($fixture->calls, ['provider', 'validate', 'claim', 'extract', 'recognize', 'map', 'enqueue', 'complete']);
     }
 
     public function reportsIntentionallyUnsupportedMapping(): void
@@ -243,7 +243,8 @@ final class WebhookProcessorTest
         )->process(input: $this->input());
 
         Assert::instanceOf($result, ReplayedWebhookEvent::class);
-        Assert::same($fixture->calls, ['provider', 'validate', 'claim']);
+        Assert::false(in_array('complete', $fixture->calls, strict: true));
+        Assert::false(in_array('release', $fixture->calls, strict: true));
     }
 
     public function suppliesSafeFallbackForEmptyUnsupportedReason(): void
@@ -315,12 +316,33 @@ final class WebhookProcessorTest
             )->process(input: $this->input());
         } catch (\RuntimeException $exception) {
             Assert::same($exception->getMessage(), 'Durable acceptance failed');
-            Assert::same($fixture->calls[7], 'release');
+            Assert::same($fixture->calls, ['provider', 'validate', 'claim', 'extract', 'recognize', 'map', 'enqueue', 'release']);
 
             return;
         }
 
         Assert::fail('Expected durable acceptance failure');
+    }
+
+    public function keepsTheProcessingFailureWhenReleasingTheClaimAlsoFails(): void
+    {
+        $fixture = new WebhookPipelineFixture();
+        $fixture->acceptanceFails = true;
+        $fixture->releaseFails = true;
+
+        try {
+            $this->processor(
+                fixture: $fixture,
+                acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
+            )->process(input: $this->input());
+        } catch (\RuntimeException $exception) {
+            Assert::same($exception->getMessage(), 'Releasing the webhook claim failed: Releasing the claim failed');
+            Assert::same($exception->getPrevious()?->getMessage(), 'Durable acceptance failed');
+
+            return;
+        }
+
+        Assert::fail('Expected the release failure to surface with the original cause attached');
     }
 
     public function supportsAcknowledgementAfterSynchronousPersistence(): void
@@ -333,7 +355,7 @@ final class WebhookProcessorTest
 
         Assert::instanceOf($result, ProcessedWebhook::class);
         Assert::same($result->acknowledgementPolicy, WebhookAcknowledgementPolicy::AfterPersistence);
-        Assert::same($fixture->calls[6], 'reconcile');
+        Assert::same($fixture->calls, ['provider', 'validate', 'claim', 'extract', 'recognize', 'map', 'reconcile', 'complete']);
     }
 
     private function processor(

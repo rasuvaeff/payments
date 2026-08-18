@@ -5,14 +5,13 @@ declare(strict_types=1);
 namespace Rasuvaeff\Payments;
 
 use Rasuvaeff\Payments\Internal\Assert;
+use Rasuvaeff\Payments\Internal\WebhookLimits;
 
 /**
  * @api
  */
 final readonly class InvalidWebhook implements WebhookValidationResult
 {
-    private const int REASON_MAXIMUM_LENGTH = 1_024;
-
     /** @var non-empty-string */
     public string $reason;
 
@@ -21,7 +20,7 @@ final readonly class InvalidWebhook implements WebhookValidationResult
         Assert::nonBlank(
             value: $reason,
             name: 'Webhook validation failure reason',
-            maximumLength: self::REASON_MAXIMUM_LENGTH,
+            maximumLength: WebhookLimits::REASON,
         );
 
         $this->reason = $reason;

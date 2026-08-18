@@ -7,6 +7,7 @@ namespace Rasuvaeff\Payments;
 use Psr\Http\Message\ResponseFactoryInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
+use Psr\Log\LoggerInterface;
 
 /**
  * PSR-7 HTTP adapter. It never includes provider payloads or validation reasons in responses.
@@ -25,6 +26,7 @@ final readonly class WebhookController
     public function __construct(
         private WebhookProcessorRegistry $registry,
         private ResponseFactoryInterface $responseFactory,
+        private ?LoggerInterface $logger = null,
     ) {}
 
     public function handle(ServerRequestInterface $request, string $provider): ResponseInterface
@@ -57,7 +59,15 @@ final readonly class WebhookController
                     ],
                 ),
             );
-        } catch (\Throwable) {
+        } catch (\Throwable $exception) {
+            // The response stays opaque on purpose; without this hook a durable
+            // processing failure would leave no trace at all, and detection
+            // would rest entirely on someone watching the 503 rate.
+            $this->logger?->error('Webhook processing failed', [
+                'provider' => $paymentProvider->value,
+                'exception' => $exception,
+            ]);
+
             return $this->response(status: 503, outcome: 'processing_failed');
         }
 
