@@ -1,0 +1,28 @@
+{
+    "$schema": "vendor/infection/infection/resources/schema.json",
+    "source": {
+        "directories": ["src"]
+    },
+    "logs": {
+        "text": "php://stderr",
+        "summary": "build/infection-summary.log"
+    },
+    "testFramework": "testo",
+    "minMsi": 100,
+    "mutators": {
+        "@default": true,
+        // Equivalent mutant, verified 2026-08-17 (466/468 killed before the
+        // ignore). The addParts carry `>=` on the exact boundary
+        // (remainder == denominator - addedRemainder) is self-healing: with
+        // the carry skipped, the remainder becomes exactly $denominator, and
+        // either the following addParts fires the carry (same cumulative
+        // quotient, same next remainder) or — when it was the last one — the
+        // final `remainder >= roundUpAt` round-up adds the same +1. Every
+        // distinguishing input produces an identical observable result.
+        "GreaterThanOrEqualTo": {
+            "ignore": [
+                "Rasuvaeff\\Payments\\Money::addParts"
+            ]
+        }
+    }
+}
