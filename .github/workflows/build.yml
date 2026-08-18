@@ -97,7 +97,7 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           coverage: none
-          extensions: json, mbstring, bcmath, intl
+          extensions: json, mbstring
           tools: composer:v2
 
       - name: Resolve the Composer cache directory
@@ -134,7 +134,7 @@ jobs:
         with:
           php-version: '8.3'
           coverage: none
-          extensions: json, mbstring, bcmath, intl
+          extensions: json, mbstring
           tools: composer:v2
 
       - name: Resolve the Composer cache directory
@@ -171,7 +171,7 @@ jobs:
         with:
           php-version: '8.4'
           coverage: pcov
-          extensions: json, mbstring, bcmath, intl
+          extensions: json, mbstring
           tools: composer:v2
 
       - name: Resolve the Composer cache directory
