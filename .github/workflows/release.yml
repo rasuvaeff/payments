@@ -30,7 +30,6 @@ jobs:
           persist-credentials: false
 
       - name: Extract the changelog section for this tag
-        id: notes
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -45,17 +44,15 @@ jobs:
           if [ -z "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
             notes="See [CHANGELOG.md](CHANGELOG.md)."
           fi
-          {
-            echo 'body<<RELEASE_NOTES_EOF'
-            printf '%s\n' "$notes"
-            echo 'RELEASE_NOTES_EOF'
-          } >> "$GITHUB_OUTPUT"
+          # A file, not a GITHUB_OUTPUT heredoc: a changelog line equal to
+          # the delimiter would end the value early and the rest would be
+          # parsed as further output keys.
+          printf '%s\n' "$notes" > "$RUNNER_TEMP/release-notes.md"
 
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-          BODY: ${{ steps.notes.outputs.body }}
         run: |
           # Idempotent: a re-run of the workflow must not fail on an existing
           # release, and a release is never re-created (Packagist blocks
@@ -64,5 +61,5 @@ jobs:
             echo "Release $TAG already exists"
             exit 0
           fi
-          printf '%s' "$BODY" | gh release create "$TAG" --title "$TAG" --notes-file -
+          gh release create "$TAG" --title "$TAG" --verify-tag --notes-file "$RUNNER_TEMP/release-notes.md"
 
