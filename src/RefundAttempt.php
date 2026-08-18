@@ -40,6 +40,10 @@ final readonly class RefundAttempt
             throw new \InvalidArgumentException('Actual refund currency must match requested currency');
         }
 
+        if ($actualAmount instanceof Money && $actualAmount->minorUnits > $requestedAmount->minorUnits) {
+            throw new \InvalidArgumentException('Actual refund amount cannot exceed the requested amount');
+        }
+
         if ($updatedAt < $createdAt) {
             throw new \InvalidArgumentException('Refund attempt updated time cannot precede created time');
         }

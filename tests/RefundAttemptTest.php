@@ -45,6 +45,12 @@ final class RefundAttemptTest
         $this->create(rawStatus: '');
     }
 
+    public function rejectsActualAmountAboveRequested(): void
+    {
+        Expect::exception(\InvalidArgumentException::class);
+        $this->create(actualAmount: Fixtures::money(minorUnits: 400));
+    }
+
     public function rejectsMismatchedRefundProvider(): void
     {
         Expect::exception(\InvalidArgumentException::class);

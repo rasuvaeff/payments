@@ -26,6 +26,14 @@ final class CapabilitySetTest
         Assert::same(count($set->all()), 2);
     }
 
+    public function answersForAnAbsentCapability(): void
+    {
+        $set = CapabilitySet::of(new SandboxCapability());
+
+        Assert::false($set->has(PartialRefundCapability::class));
+        Assert::null($set->get(PartialRefundCapability::class));
+    }
+
     public function rejectsDuplicateCapabilityTypes(): void
     {
         Expect::exception(\InvalidArgumentException::class);

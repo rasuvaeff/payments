@@ -42,6 +42,18 @@ final class PaymentIntentTest
         new PaymentIntent(id: '', amount: Fixtures::money(), createdAt: new \DateTimeImmutable());
     }
 
+    public function rejectsAttemptOfAnotherType(): void
+    {
+        // The look-alike carries a matching currency on purpose: it passes the
+        // currency guard, so only the type guard can reject it.
+        $lookalike = new class (Fixtures::money()) {
+            public function __construct(public Money $amount) {}
+        };
+
+        Expect::exception(\InvalidArgumentException::class);
+        new PaymentIntent(id: 'intent-1', amount: Fixtures::money(), createdAt: new \DateTimeImmutable(), attempts: [$lookalike]);
+    }
+
     public function rejectsAttemptInDifferentCurrency(): void
     {
         $attempt = new PaymentAttempt(

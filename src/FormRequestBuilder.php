@@ -31,13 +31,14 @@ final readonly class FormRequestBuilder implements RequestBuilderInterface
         }
 
         $request = $this->requestFactory->createRequest($method, $uri)
-            ->withBody($this->streamFactory->createStream(http_build_query($data, '', '&', PHP_QUERY_RFC3986)))
-            ->withHeader('Content-Type', 'application/x-www-form-urlencoded');
+            ->withBody($this->streamFactory->createStream(http_build_query($data, '', '&', PHP_QUERY_RFC3986)));
 
         foreach ($auth->headers() as $name => $value) {
             $request = $request->withHeader($name, $value);
         }
 
-        return $request;
+        // The media type is the builder's, not the caller's: an authentication
+        // context carrying Content-Type must not decide how the body is read.
+        return $request->withHeader('Content-Type', 'application/x-www-form-urlencoded');
     }
 }

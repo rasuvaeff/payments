@@ -22,7 +22,7 @@ final readonly class PaymentIntent
     public array $attempts;
 
     /**
-     * @param array<array-key, PaymentAttempt> $attempts
+     * @param array<array-key, mixed> $attempts
      */
     public function __construct(
         string $id,
@@ -36,13 +36,24 @@ final readonly class PaymentIntent
             throw new \InvalidArgumentException('Payment intent attempts must be a list');
         }
 
+        $checked = [];
+
         foreach ($attempts as $attempt) {
+            // The list is @api input: an element of another type has to fail
+            // the same way as every other malformed argument here, not as a
+            // TypeError from the property access below.
+            if (!$attempt instanceof PaymentAttempt) {
+                throw new \InvalidArgumentException('Payment intent attempts must be PaymentAttempt instances');
+            }
+
             if ($attempt->amount->currency !== $amount->currency) {
                 throw new \InvalidArgumentException('Payment attempt currency must match intent currency');
             }
+
+            $checked[] = $attempt;
         }
 
         $this->id = $id;
-        $this->attempts = $attempts;
+        $this->attempts = $checked;
     }
 }

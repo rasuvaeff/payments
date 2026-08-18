@@ -122,6 +122,10 @@ final readonly class WebhookInput
 
             if (is_string($headers[$headerName])) {
                 $headerValues = [$headers[$headerName]];
+            } elseif ($headers[$headerName] === []) {
+                // An empty list would silently drop the header, and header()
+                // would then answer exactly as it does for an absent one.
+                throw new \InvalidArgumentException('Webhook header value lists must not be empty');
             } elseif (is_array($headers[$headerName]) && array_is_list($headers[$headerName])) {
                 /** @var list<string> $headerValues */
                 $headerValues = [];
@@ -177,6 +181,12 @@ final readonly class WebhookInput
 
     private function isSensitiveName(string $name): bool
     {
-        return preg_match('/authorization|cookie|signature|(?:^|[-_])sig(?:$|[-_])|secret|token|api[-_]?key/i', $name) === 1;
+        // Best-effort denial list, not a guarantee: it names the credential
+        // classes seen on payment webhooks, and an unknown vendor prefix can
+        // still slip through. Logging policy stays the caller's job.
+        return preg_match(
+            '/authorization|cookie|signature|(?:^|[-_])sig(?:$|[-_])|secret|token|api[-_]?key|credential|password|passwd|bearer|session|private/i',
+            $name,
+        ) === 1;
     }
 }
