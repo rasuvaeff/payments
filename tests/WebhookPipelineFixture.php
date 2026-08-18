@@ -44,6 +44,7 @@ final class WebhookPipelineFixture implements
     public string $malformedReason = 'Amount precision is not supported';
     public string $unsupportedReason = 'Event payload version is unsupported';
     public bool $acceptanceFails = false;
+    public bool $releaseFails = false;
     public ?ObservedPaymentEvent $acceptedEvent = null;
 
     /** @var list<string> */
@@ -126,6 +127,10 @@ final class WebhookPipelineFixture implements
     public function release(PaymentProvider $provider, string $providerEventId): void
     {
         $this->calls[] = 'release';
+
+        if ($this->releaseFails) {
+            throw new \RuntimeException('Releasing the claim failed');
+        }
     }
 
     #[\Override]

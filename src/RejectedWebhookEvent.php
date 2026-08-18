@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Rasuvaeff\Payments;
 
 use Rasuvaeff\Payments\Internal\Assert;
+use Rasuvaeff\Payments\Internal\WebhookLimits;
 
 /**
  * A validated event whose payload can never be mapped.
@@ -25,9 +26,6 @@ use Rasuvaeff\Payments\Internal\Assert;
  */
 final readonly class RejectedWebhookEvent implements WebhookProcessingResult
 {
-    private const int PROVIDER_EVENT_ID_MAXIMUM_LENGTH = 255;
-    private const int REASON_MAXIMUM_LENGTH = 1_024;
-
     /** @var non-empty-string */
     public string $providerEventId;
 
@@ -42,12 +40,12 @@ final readonly class RejectedWebhookEvent implements WebhookProcessingResult
         Assert::nonBlank(
             value: $providerEventId,
             name: 'Provider event id',
-            maximumLength: self::PROVIDER_EVENT_ID_MAXIMUM_LENGTH,
+            maximumLength: WebhookLimits::PROVIDER_EVENT_ID,
         );
         Assert::nonBlank(
             value: $reason,
             name: 'Rejected webhook event reason',
-            maximumLength: self::REASON_MAXIMUM_LENGTH,
+            maximumLength: WebhookLimits::REASON,
         );
 
         $this->providerEventId = $providerEventId;

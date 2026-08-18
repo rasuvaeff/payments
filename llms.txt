@@ -145,7 +145,7 @@ Webhook HTTP endpoint:
 $registry = new WebhookProcessorRegistry([
     new WebhookProcessorRegistration(provider: $provider, processor: $processor),
 ]); // duplicate provider => InvalidArgumentException
-$controller = new WebhookController(registry: $registry, responseFactory: $psr17ResponseFactory);
+$controller = new WebhookController(registry: $registry, responseFactory: $psr17ResponseFactory, logger: $psr3Logger); // logger optional
 $response = $controller->handle($serverRequest, 'stripe'); // PSR-7
 ```
 

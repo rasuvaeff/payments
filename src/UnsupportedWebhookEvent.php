@@ -5,15 +5,13 @@ declare(strict_types=1);
 namespace Rasuvaeff\Payments;
 
 use Rasuvaeff\Payments\Internal\Assert;
+use Rasuvaeff\Payments\Internal\WebhookLimits;
 
 /**
  * @api
  */
 final readonly class UnsupportedWebhookEvent implements WebhookProcessingResult
 {
-    private const int PROVIDER_EVENT_ID_MAXIMUM_LENGTH = 255;
-    private const int REASON_MAXIMUM_LENGTH = 1_024;
-
     /** @var non-empty-string */
     public string $providerEventId;
 
@@ -28,12 +26,12 @@ final readonly class UnsupportedWebhookEvent implements WebhookProcessingResult
         Assert::nonBlank(
             value: $providerEventId,
             name: 'Provider event id',
-            maximumLength: self::PROVIDER_EVENT_ID_MAXIMUM_LENGTH,
+            maximumLength: WebhookLimits::PROVIDER_EVENT_ID,
         );
         Assert::nonBlank(
             value: $reason,
             name: 'Unsupported webhook event reason',
-            maximumLength: self::REASON_MAXIMUM_LENGTH,
+            maximumLength: WebhookLimits::REASON,
         );
 
         $this->providerEventId = $providerEventId;

@@ -12,7 +12,7 @@ namespace Rasuvaeff\Payments;
  * failed one always has its reason.
  *
  * The set is deliberately open: a decorating processor may add its own outcome.
- * `WebhookProcessor::process()` narrows its return type to the five outcomes
+ * `WebhookProcessor::process()` narrows its return type to the six outcomes
  * this package ships, so calling the concrete processor allows an exhaustive
  * `instanceof` chain; calling through `WebhookProcessorInterface` does not.
  *

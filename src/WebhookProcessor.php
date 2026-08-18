@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Rasuvaeff\Payments;
 
+use Rasuvaeff\Payments\Internal\WebhookLimits;
+
 /**
  * Validates, claims, maps and durably accepts provider webhook events.
  *
@@ -17,8 +19,6 @@ namespace Rasuvaeff\Payments;
  */
 final readonly class WebhookProcessor implements WebhookProcessorInterface
 {
-    private const int EVENT_TYPE_MAXIMUM_LENGTH = 255;
-
     public function __construct(
         private WebhookValidatorInterface $validator,
         private WebhookEventTypeExtractorInterface $eventTypeExtractor,
@@ -53,7 +53,17 @@ final readonly class WebhookProcessor implements WebhookProcessorInterface
         try {
             $result = $this->processClaimed(input: $input, providerEventId: $providerEventId);
         } catch (\Throwable $exception) {
-            $this->eventStore->release(provider: $input->provider, providerEventId: $providerEventId);
+            try {
+                $this->eventStore->release(provider: $input->provider, providerEventId: $providerEventId);
+            } catch (\Throwable $releaseFailure) {
+                // The store failure is the secondary fault: losing the original
+                // one would hide why processing failed from both the log and the
+                // controller's HTTP mapping.
+                throw new \RuntimeException(
+                    'Releasing the webhook claim failed: ' . $releaseFailure->getMessage(),
+                    previous: $exception,
+                );
+            }
 
             throw $exception;
         }
@@ -76,7 +86,7 @@ final readonly class WebhookProcessor implements WebhookProcessorInterface
             return new UnknownWebhookEvent(providerEventId: $providerEventId);
         }
 
-        if (strlen($rawEventType) > self::EVENT_TYPE_MAXIMUM_LENGTH) {
+        if (strlen($rawEventType) > WebhookLimits::PROVIDER_EVENT_TYPE) {
             return new UnknownWebhookEvent(providerEventId: $providerEventId);
         }
 
@@ -90,6 +100,10 @@ final readonly class WebhookProcessor implements WebhookProcessorInterface
         }
 
         if ($eventType->provider->value !== $input->provider->value) {
+            // Deliberately an exception, not a RejectedWebhookEvent: a provider
+            // mismatch is a wiring fault of the adapter, identical on every
+            // redelivery. Answering 204 would let a mis-wired adapter drop live
+            // events in silence, so the delivery is left retryable and loud.
             throw new \LogicException('Recognized webhook event type uses another provider');
         }
 
