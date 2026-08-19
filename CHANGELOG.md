@@ -48,8 +48,11 @@ Initial release.
   (HTTP 204), so one poison payload cannot drive the retry storm that gets an
   endpoint disabled and loses the deliveries behind it.
 - A claim is finalised explicitly through `WebhookEventStoreInterface::complete()`.
-  Without it, a claim abandoned by a process that died before `release()` was
-  answered as a replay forever and the event was lost in silence.
+  Without a completion signal a store cannot tell an in-flight claim from a
+  finished one: expire claims and an already-handled event is processed again on
+  the next provider retry; never expire them and a claim abandoned by a killed
+  process answers every later delivery with a replay outcome, so the provider
+  stops retrying and the event is lost with no error anywhere.
 - An empty request body is reported as its own `empty_body` outcome rather than
   as a signature failure, so a body-parsing middleware mounted ahead of the
   webhook route is diagnosable from the response alone.
