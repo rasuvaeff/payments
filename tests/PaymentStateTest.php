@@ -31,6 +31,11 @@ final class PaymentStateTest
         yield 'action may return to pending' => [PaymentState::RequiresAction, PaymentState::Pending, true];
         yield 'terminal success stays terminal' => [PaymentState::Succeeded, PaymentState::Failed, false];
         yield 'terminal failure stays terminal' => [PaymentState::Failed, PaymentState::Processing, false];
+        yield 'declined card retries into processing' => [PaymentState::RequiresPaymentMethod, PaymentState::Processing, true];
+        yield 'authorization settles' => [PaymentState::RequiresCapture, PaymentState::Succeeded, true];
+        yield 'authorization cannot ask for another method' => [PaymentState::RequiresCapture, PaymentState::RequiresPaymentMethod, false];
+        yield 'processing may need an action' => [PaymentState::Processing, PaymentState::RequiresAction, true];
+        yield 'processing never returns to pending' => [PaymentState::Processing, PaymentState::Pending, false];
     }
 
     #[Property(runs: 300, auto: true)]
