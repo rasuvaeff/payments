@@ -79,18 +79,30 @@ PayPal). Заказы PayPal создаются с интентом `CAPTURE`: �
 ## Маршрутизация между несколькими шлюзами
 
 ```php
-use Rasuvaeff\Payments\GatewayRegistry;
+use Rasuvaeff\Payments\CapturePaymentRequest;
 use Rasuvaeff\Payments\FixedGatewaySelectionPolicy;
+use Rasuvaeff\Payments\GatewayRegistry;
+use Rasuvaeff\Payments\GatewaySelectionContext;
+use Rasuvaeff\Payments\OperationId;
 use Rasuvaeff\Payments\PaymentGatewayRouter;
 
-$registry = new GatewayRegistry($stripe, $paypal);
+$registry = new GatewayRegistry([$stripe, $paypal]);   // один iterable шлюзов
 $router = new PaymentGatewayRouter(
     registry: $registry,
     selectionPolicy: new FixedGatewaySelectionPolicy(provider: $stripe->provider()),
 );
 
-$attempt = $router->createPayment($request);          // провайдера выбирает политика
-$attempt = $router->capturePayment($captureRequest);  // маршрут по провайдеру из ссылки
+// Создание принимает контекст маршрутизации, а не запрос: его читает политика
+$attempt = $router->createPayment(new GatewaySelectionContext(
+    request: $createRequest,
+    tenantId: 'tenant-1',
+));
+
+// Все последующие операции принимают свой запрос и идут по $payment->provider
+$captured = $router->capturePayment(new CapturePaymentRequest(
+    operationId: new OperationId(value: 'order-42-capture'),
+    payment: $attempt->payment,
+));
 ```
 
 Создание — единственная операция, которую выбирает политика; всё остальное
@@ -239,11 +251,14 @@ final class DbWebhookEventStore implements WebhookEventStoreInterface
     public function complete(PaymentProvider $provider, string $providerEventId): void
     {
         // UPDATE ... SET completed_at = now()
+        //   WHERE provider = :provider AND provider_event_id = :id
+        //   AND completed_at IS NULL
     }
 
     public function release(PaymentProvider $provider, string $providerEventId): void
     {
-        // DELETE ... WHERE completed_at IS NULL
+        // DELETE ... WHERE provider = :provider AND provider_event_id = :id
+        //   AND completed_at IS NULL
     }
 }
 ```

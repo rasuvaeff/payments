@@ -79,18 +79,30 @@ and `capturePayment()` completes it.
 ## Route between several gateways
 
 ```php
-use Rasuvaeff\Payments\GatewayRegistry;
+use Rasuvaeff\Payments\CapturePaymentRequest;
 use Rasuvaeff\Payments\FixedGatewaySelectionPolicy;
+use Rasuvaeff\Payments\GatewayRegistry;
+use Rasuvaeff\Payments\GatewaySelectionContext;
+use Rasuvaeff\Payments\OperationId;
 use Rasuvaeff\Payments\PaymentGatewayRouter;
 
-$registry = new GatewayRegistry($stripe, $paypal);
+$registry = new GatewayRegistry([$stripe, $paypal]);   // one iterable of gateways
 $router = new PaymentGatewayRouter(
     registry: $registry,
     selectionPolicy: new FixedGatewaySelectionPolicy(provider: $stripe->provider()),
 );
 
-$attempt = $router->createPayment($request);          // policy picks the provider
-$attempt = $router->capturePayment($captureRequest);  // routed by the reference's provider
+// Creation takes the routing context, not the request: the policy reads it
+$attempt = $router->createPayment(new GatewaySelectionContext(
+    request: $createRequest,
+    tenantId: 'tenant-1',
+));
+
+// Every later operation takes its own request and routes by $payment->provider
+$captured = $router->capturePayment(new CapturePaymentRequest(
+    operationId: new OperationId(value: 'order-42-capture'),
+    payment: $attempt->payment,
+));
 ```
 
 Creation is the only operation the policy chooses; every later operation routes
@@ -237,11 +249,14 @@ final class DbWebhookEventStore implements WebhookEventStoreInterface
     public function complete(PaymentProvider $provider, string $providerEventId): void
     {
         // UPDATE ... SET completed_at = now()
+        //   WHERE provider = :provider AND provider_event_id = :id
+        //   AND completed_at IS NULL
     }
 
     public function release(PaymentProvider $provider, string $providerEventId): void
     {
-        // DELETE ... WHERE completed_at IS NULL
+        // DELETE ... WHERE provider = :provider AND provider_event_id = :id
+        //   AND completed_at IS NULL
     }
 }
 ```
