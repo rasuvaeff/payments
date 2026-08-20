@@ -232,31 +232,37 @@ if ($attempt->state === PaymentState::Succeeded && $attempt->amount->equals($ord
 
 ## Implement the event store
 
-The store owns replay protection, and its contract has three calls:
+The store owns replay protection, and its contract has three calls fenced by
+a claim token:
 
 ```php
 final class DbWebhookEventStore implements WebhookEventStoreInterface
 {
     private const int LEASE_SECONDS = 300;
 
-    public function claim(PaymentProvider $provider, string $providerEventId): bool
+    public function claim(PaymentProvider $provider, string $providerEventId): ?WebhookClaimToken
     {
         // INSERT ... ON CONFLICT DO UPDATE ... WHERE completed_at IS NULL
-        //   AND claimed_at < now() - lease, RETURNING id
-        // -> true when the row was inserted or a stale claim was taken over.
+        //   AND claimed_at < now() - lease,
+        //   RETURNING claim_token — or mint one (WebhookClaimToken::generate())
+        //   and store it next to claimed_at.
+        // -> a token when the row was inserted or a stale claim was taken over.
+        // -> null when a completed attempt or a live claim holds the id.
     }
 
-    public function complete(PaymentProvider $provider, string $providerEventId): void
+    public function complete(PaymentProvider $provider, string $providerEventId, WebhookClaimToken $token): void
     {
         // UPDATE ... SET completed_at = now()
         //   WHERE provider = :provider AND provider_event_id = :id
         //   AND completed_at IS NULL
+        //   AND claim_token = :token      <- the fence
     }
 
-    public function release(PaymentProvider $provider, string $providerEventId): void
+    public function release(PaymentProvider $provider, string $providerEventId, WebhookClaimToken $token): void
     {
         // DELETE ... WHERE provider = :provider AND provider_event_id = :id
         //   AND completed_at IS NULL
+        //   AND claim_token = :token      <- the fence
     }
 }
 ```
@@ -270,10 +276,20 @@ provider retry; never expire them and the interrupted event is answered with a
 replay outcome — HTTP 204 — so the provider stops retrying and the event is
 lost with no error anywhere.
 
+The token is the second half of lease safety. Expiry hands the claim to
+another worker, but the stalled one eventually wakes up: without a fence its
+`complete()` would finalise an attempt that lost the claim, and its
+`release()` — the sharper failure — would delete the new owner's live claim
+and let a third delivery start processing concurrently. Both finalisers
+therefore compare the token against the stored value and do nothing on a
+mismatch; a takeover silently replaces the token, which is what turns the old
+worker's calls into no-ops.
+
 If the queue lives in the same database, there is a simpler option: commit the
 claim row and the queue row in **one transaction**, so "a claim exists" already
 implies "the event is durable". A broker (SQS, Redis) cannot join that
-transaction, so those deployments need the lease plus `complete()`.
+transaction, so those deployments need the lease plus `complete()` — and the
+token fence that keeps an expired lease from corrupting the takeover.
 
 ## Choose an acknowledgement policy
 

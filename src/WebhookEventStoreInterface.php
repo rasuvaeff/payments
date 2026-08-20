@@ -10,10 +10,18 @@ namespace Rasuvaeff\Payments;
  * The three calls form one lifecycle per provider event id:
  *
  * ```text
- * claim() -> true  ->  processing  ->  complete()   (terminal: never replayed)
- *                                  \-> release()    (retryable: may be claimed again)
- * claim() -> false ->  already claimed by a completed or in-flight attempt
+ * claim() -> token ->  processing  ->  complete(token)  (terminal: never replayed)
+ *                                  \-> release(token)   (retryable: may be claimed again)
+ * claim() -> null   ->  already claimed by a completed or in-flight attempt
  * ```
+ *
+ * `claim()` returns a fresh `WebhookClaimToken` with every successful claim.
+ * The token is the fencing device: once a lease expires and another worker
+ * takes the claim over, the stored token changes, and every finaliser call
+ * carrying the old token is a no-op. Without that fence a stalled worker
+ * waking up after a takeover could `complete()` an already-final row or —
+ * worse — `release()` a live claim, deleting the new owner's reservation and
+ * letting a third delivery start processing concurrently.
  *
  * `complete()` exists because a process can die between `claim()` and the end
  * of processing without ever reaching `release()` — SIGKILL, the OOM killer,
@@ -38,25 +46,29 @@ namespace Rasuvaeff\Payments;
 interface WebhookEventStoreInterface
 {
     /**
-     * Atomically reserves the event id. Returns false when it is already
-     * reserved by a completed attempt or by a live (non-expired) claim.
+     * Atomically reserves the event id and returns a token proving ownership
+     * of the claim. Returns null when the id is already reserved by a
+     * completed attempt or by a live (non-expired) claim.
      *
      * @param non-empty-string $providerEventId
      */
-    public function claim(PaymentProvider $provider, string $providerEventId): bool;
+    public function claim(PaymentProvider $provider, string $providerEventId): ?WebhookClaimToken;
 
     /**
-     * Marks a claim final: the event was durably accepted and must never be
-     * processed again, however long the record lives.
+     * Marks the claim final: the event was durably accepted and must never be
+     * processed again, however long the record lives. A no-op when the token
+     * no longer matches the stored one — the claim was revoked or taken over.
      *
      * @param non-empty-string $providerEventId
      */
-    public function complete(PaymentProvider $provider, string $providerEventId): void;
+    public function complete(PaymentProvider $provider, string $providerEventId, WebhookClaimToken $token): void;
 
     /**
-     * Releases an incomplete claim after a retryable processing failure.
+     * Releases an incomplete claim after a retryable processing failure. A
+     * no-op when the token no longer matches the stored one, so a worker
+     * whose lease expired cannot delete a claim another worker now owns.
      *
      * @param non-empty-string $providerEventId
      */
-    public function release(PaymentProvider $provider, string $providerEventId): void;
+    public function release(PaymentProvider $provider, string $providerEventId, WebhookClaimToken $token): void;
 }

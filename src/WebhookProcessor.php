@@ -15,6 +15,10 @@ use Rasuvaeff\Payments\Internal\WebhookLimits;
  * thrown exception releases the claim, which is what makes the delivery
  * retryable.
  *
+ * The claim token returned by the store is threaded unchanged to both
+ * finalisers, so a claim revoked by lease expiry cannot be finalised by the
+ * stalled worker that lost it.
+ *
  * @api
  */
 final readonly class WebhookProcessor implements WebhookProcessorInterface
@@ -46,7 +50,9 @@ final readonly class WebhookProcessor implements WebhookProcessorInterface
 
         $providerEventId = $validation->providerEventId;
 
-        if (!$this->eventStore->claim(provider: $input->provider, providerEventId: $providerEventId)) {
+        $token = $this->eventStore->claim(provider: $input->provider, providerEventId: $providerEventId);
+
+        if (!$token instanceof WebhookClaimToken) {
             return new ReplayedWebhookEvent(providerEventId: $providerEventId);
         }
 
@@ -54,13 +60,14 @@ final readonly class WebhookProcessor implements WebhookProcessorInterface
             $result = $this->processClaimed(input: $input, providerEventId: $providerEventId);
         } catch (\Throwable $exception) {
             try {
-                $this->eventStore->release(provider: $input->provider, providerEventId: $providerEventId);
+                $this->eventStore->release(provider: $input->provider, providerEventId: $providerEventId, token: $token);
             } catch (\Throwable $releaseFailure) {
                 // The store failure is the secondary fault: losing the original
-                // one would hide why processing failed from both the log and the
-                // controller's HTTP mapping.
+                // one would hide why processing failed from both the log and
+                // the controller's HTTP mapping.
                 throw new \RuntimeException(
                     'Releasing the webhook claim failed: ' . $releaseFailure->getMessage(),
+                    (int) $exception->getCode(),
                     previous: $exception,
                 );
             }
@@ -68,7 +75,7 @@ final readonly class WebhookProcessor implements WebhookProcessorInterface
             throw $exception;
         }
 
-        $this->eventStore->complete(provider: $input->provider, providerEventId: $providerEventId);
+        $this->eventStore->complete(provider: $input->provider, providerEventId: $providerEventId, token: $token);
 
         return $result;
     }

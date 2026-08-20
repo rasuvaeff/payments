@@ -113,14 +113,16 @@ make release-check
 - Webhooks are validated before `claim()`. Mapping runs at most once for an
   accepted provider event id; incomplete failures release their claim.
 - **The event store contract is three calls, and `complete()` is load-bearing.**
-  `claim()` reserves, `complete()` finalises after durable acceptance,
-  `release()` makes a failure retryable. Without a completion signal an
-  implementation cannot separate an in-flight claim from a finished one, and a
-  process killed between claim and acceptance either gets reprocessed (short
-  lease) or is answered with a replay 204 forever and lost silently (no lease).
-  Every outcome `process()` returns — including the ignoring ones — completes
-  the claim; only a thrown exception releases it. Do not add a return path that
-  skips both.
+  `claim()` reserves and returns a `WebhookClaimToken`, `complete()` finalises
+  after durable acceptance, `release()` makes a failure retryable; both
+  finalisers take the token and must be no-ops on a mismatch, so a worker
+  whose lease was taken over cannot corrupt the new owner's claim. Without a
+  completion signal an implementation cannot separate an in-flight claim from
+  a finished one, and a process killed between claim and acceptance either
+  gets reprocessed (short lease) or is answered with a replay 204 forever and
+  lost silently (no lease). Every outcome `process()` returns — including the
+  ignoring ones — completes the claim; only a thrown exception releases it.
+  Do not add a return path that skips both.
 - **Permanent mapping failures are terminal, not retryable.**
   `UnsupportedWebhookEventException` and `MalformedResponseException` from a
   mapper become `UnsupportedWebhookEvent` / `RejectedWebhookEvent` and are
