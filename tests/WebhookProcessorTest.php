@@ -44,6 +44,8 @@ final class WebhookProcessorTest
         Assert::same($result->event, $fixture->mappedEvent);
         Assert::same($result->acknowledgementPolicy, WebhookAcknowledgementPolicy::AfterValidation);
         Assert::same($fixture->acceptedEvent, $fixture->mappedEvent);
+        Assert::same($fixture->completedWithToken, $fixture->issuedToken);
+        Assert::null($fixture->releasedWithToken);
         Assert::same($fixture->calls, [
             'provider',
             'validate',
@@ -226,6 +228,8 @@ final class WebhookProcessorTest
         } catch (\RuntimeException) {
             Assert::false(in_array('complete', $fixture->calls, strict: true));
             Assert::true(in_array('release', $fixture->calls, strict: true));
+            Assert::same($fixture->releasedWithToken, $fixture->issuedToken);
+            Assert::null($fixture->completedWithToken);
 
             return;
         }
@@ -355,6 +359,7 @@ final class WebhookProcessorTest
 
         Assert::instanceOf($result, ProcessedWebhook::class);
         Assert::same($result->acknowledgementPolicy, WebhookAcknowledgementPolicy::AfterPersistence);
+        Assert::same($fixture->completedWithToken, $fixture->issuedToken);
         Assert::same($fixture->calls, ['provider', 'validate', 'claim', 'extract', 'recognize', 'map', 'reconcile', 'complete']);
     }
 

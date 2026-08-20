@@ -331,7 +331,7 @@ middleware, читается как пустая строка — и тогда 
 | Ошибки провайдера | `PaymentException`, `UnauthorizedException`, `ForbiddenException`, `NotFoundException`, `RateLimitedException`, `ProviderDeclinedException`, `RefundFailedException`, `ServerException` |
 | Webhook вход/результаты | `WebhookInput`, `WebhookValidationResult`, `ValidWebhook`, `InvalidWebhook`, `WebhookProcessingResult`, `ProcessedWebhook`, `WebhookValidationFailed`, `UnknownWebhookEvent`, `UnsupportedWebhookEvent`, `ReplayedWebhookEvent`, `WebhookAcknowledgementPolicy` |
 | Контракты webhook-адаптера | `WebhookValidatorInterface`, `WebhookEventTypeExtractorInterface`, `WebhookEventRecognizerInterface`, `WebhookPayloadMapperInterface`, `UnsupportedWebhookEventException` |
-| Контракты webhook-persistence | `WebhookEventStoreInterface`, `WebhookEventQueueInterface`, `WebhookReconcilerInterface`, `WebhookEventAcceptanceInterface` |
+| Контракты webhook-persistence | `WebhookEventStoreInterface`, `WebhookClaimToken`, `WebhookEventQueueInterface`, `WebhookReconcilerInterface`, `WebhookEventAcceptanceInterface` |
 | Оркестрация webhook | `WebhookProcessorInterface`, `WebhookProcessor`, `QueuedWebhookEventAcceptance`, `SynchronousWebhookEventAcceptance` |
 | Webhook HTTP | `WebhookProcessorRegistry`, `WebhookProcessorRegistration`, `WebhookController` |
 
@@ -361,7 +361,7 @@ middleware, читается как пустая строка — и тогда 
 
 | Вы предоставляете | Почему это ваше |
 |---|---|
-| `WebhookEventStoreInterface` | Атомарные `claim()`/`complete()`/`release()` поверх вашей БД или Redis — защита от replay есть решение хранилища |
+| `WebhookEventStoreInterface` | Атомарные `claim()`/`complete()`/`release()`, ограждённые `WebhookClaimToken`, поверх вашей БД или Redis — защита от replay есть решение хранилища |
 | `WebhookEventQueueInterface` **или** `WebhookReconcilerInterface` | Durable-граница: очередь для `AfterValidation`, авторитетный re-fetch + персистенция для `AfterPersistence` |
 | Персистенция intent/attempt | Проекции `PaymentIntent`/`PaymentAttempt`; адаптеры только возвращают попытки |
 | `GatewaySelectionPolicyInterface` | Бизнес-маршрутизация (или `FixedGatewaySelectionPolicy` для одного провайдера) |
@@ -406,8 +406,8 @@ private) — это best-effort фильтр, а не гарантия: незн
 маппером провайдера.
 
 У `WebhookEventStoreInterface` три вызова, и значимы все три. `claim()` обязан
-быть атомарным. `complete()` помечает событие завершённым. `release()` делает
-обычные сбои обработки повторяемыми.
+быть атомарным и возвращает `WebhookClaimToken`; `complete()` помечает событие
+завершённым. `release()` делает обычные сбои обработки повторяемыми.
 
 Именно `complete()` делает восстановление протухших захватов возможным. Процесс
 может умереть между `claim()` и концом обработки, не дойдя до `release()` —
@@ -419,6 +419,12 @@ SIGKILL, OOM-killer, `max_execution_time`, фатальная ошибка, ре
 ретраи, и событие потеряно без единой ошибки. С `complete()` правило
 однозначно: незавершённый захват с истёкшим лизом протух и обязан быть
 перезахватываемым; завершённый не выдаётся никогда.
+
+Токен — ограждение, делающее истечение лиза безопасным. `complete()` и
+`release()` обязаны сверять его с сохранённым захватом и при несовпадении не
+делать ничего: воркер, чей лиз истёк и захват перехвачен, держит устаревший
+токен, и его `release()` не должен удалять живой захват нового владельца —
+иначе третья доставка начнёт обработку параллельно.
 
 Если durable-очередь живёт в той же БД, есть более простой вариант: коммитить
 строку захвата и строку очереди одной транзакцией — тогда «захват существует»

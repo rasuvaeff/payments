@@ -15,6 +15,7 @@ use Rasuvaeff\Payments\ReplayedWebhookEvent;
 use Rasuvaeff\Payments\UnknownWebhookEvent;
 use Rasuvaeff\Payments\UnsupportedWebhookEvent;
 use Rasuvaeff\Payments\ValidWebhook;
+use Rasuvaeff\Payments\WebhookClaimToken;
 use Rasuvaeff\Payments\WebhookEventQueueInterface;
 use Rasuvaeff\Payments\WebhookEventRecognizerInterface;
 use Rasuvaeff\Payments\WebhookEventStoreInterface;
@@ -87,37 +88,61 @@ $mapper = new readonly class ($provider) implements WebhookPayloadMapperInterfac
 // that died without releasing it — that one is retried. A completed claim is
 // never handed out again, however old it is. In a real application this is one
 // row with a unique key on (provider, provider_event_id).
+//
+// The claim token is the fence: every claim mints a fresh one, and both
+// finalisers compare it against the stored value before acting. A worker
+// whose lease expired and whose claim was taken over holds a stale token,
+// so its complete() or release() is a no-op instead of corrupting the new
+// owner's claim.
 $eventStore = new class implements WebhookEventStoreInterface {
     private const int LEASE_SECONDS = 300;
 
-    /** @var array<string, array{completed: bool, claimedAt: int}> */
+    /** @var array<string, array{completed: bool, claimedAt: int, token: WebhookClaimToken}> */
     private array $claims = [];
 
     #[\Override]
-    public function claim(PaymentProvider $provider, string $providerEventId): bool
+    public function claim(PaymentProvider $provider, string $providerEventId): ?WebhookClaimToken
     {
         $key = $provider->value . ':' . $providerEventId;
         $claim = $this->claims[$key] ?? null;
 
         if ($claim !== null && ($claim['completed'] || $claim['claimedAt'] + self::LEASE_SECONDS > time())) {
-            return false;
+            return null;
         }
 
-        $this->claims[$key] = ['completed' => false, 'claimedAt' => time()];
+        $token = WebhookClaimToken::generate();
+        $this->claims[$key] = ['completed' => false, 'claimedAt' => time(), 'token' => $token];
 
-        return true;
+        return $token;
     }
 
     #[\Override]
-    public function complete(PaymentProvider $provider, string $providerEventId): void
+    public function complete(PaymentProvider $provider, string $providerEventId, WebhookClaimToken $token): void
     {
-        $this->claims[$provider->value . ':' . $providerEventId] = ['completed' => true, 'claimedAt' => time()];
+        $claim = $this->claims[$provider->value . ':' . $providerEventId] ?? null;
+
+        if ($claim === null || !$claim['token']->equals($token)) {
+            return; // stale token: the claim was revoked or taken over
+        }
+
+        $this->claims[$provider->value . ':' . $providerEventId] = [
+            'completed' => true,
+            'claimedAt' => time(),
+            'token' => $token,
+        ];
     }
 
     #[\Override]
-    public function release(PaymentProvider $provider, string $providerEventId): void
+    public function release(PaymentProvider $provider, string $providerEventId, WebhookClaimToken $token): void
     {
-        unset($this->claims[$provider->value . ':' . $providerEventId]);
+        $key = $provider->value . ':' . $providerEventId;
+        $claim = $this->claims[$key] ?? null;
+
+        if ($claim === null || !$claim['token']->equals($token)) {
+            return; // stale token: never delete a claim another worker owns
+        }
+
+        unset($this->claims[$key]);
     }
 };
 $queue = new class implements WebhookEventQueueInterface {

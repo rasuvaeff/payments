@@ -234,31 +234,37 @@ if ($attempt->state === PaymentState::Succeeded && $attempt->amount->equals($ord
 
 ## Реализация хранилища событий
 
-Хранилище владеет защитой от replay, и в его контракте три вызова:
+Хранилище владеет защитой от replay, и в его контракте три вызова, ограждённые
+токеном захвата:
 
 ```php
 final class DbWebhookEventStore implements WebhookEventStoreInterface
 {
     private const int LEASE_SECONDS = 300;
 
-    public function claim(PaymentProvider $provider, string $providerEventId): bool
+    public function claim(PaymentProvider $provider, string $providerEventId): ?WebhookClaimToken
     {
         // INSERT ... ON CONFLICT DO UPDATE ... WHERE completed_at IS NULL
-        //   AND claimed_at < now() - lease, RETURNING id
-        // -> true, если строка вставлена или протухший захват перехвачен.
+        //   AND claimed_at < now() - lease,
+        //   RETURNING claim_token — либо сгенерировать его
+        //   (WebhookClaimToken::generate()) и сохранить рядом с claimed_at.
+        // -> токен, если строка вставлена или протухший захват перехвачен.
+        // -> null, если id держит завершённая попытка или живой захват.
     }
 
-    public function complete(PaymentProvider $provider, string $providerEventId): void
+    public function complete(PaymentProvider $provider, string $providerEventId, WebhookClaimToken $token): void
     {
         // UPDATE ... SET completed_at = now()
         //   WHERE provider = :provider AND provider_event_id = :id
         //   AND completed_at IS NULL
+        //   AND claim_token = :token      <- ограждение
     }
 
-    public function release(PaymentProvider $provider, string $providerEventId): void
+    public function release(PaymentProvider $provider, string $providerEventId, WebhookClaimToken $token): void
     {
         // DELETE ... WHERE provider = :provider AND provider_event_id = :id
         //   AND completed_at IS NULL
+        //   AND claim_token = :token      <- ограждение
     }
 }
 ```
@@ -271,10 +277,19 @@ final class DbWebhookEventStore implements WebhookEventStoreInterface
 неистекающие — прерванное событие получит replay-исход, HTTP 204, провайдер
 прекратит ретраи, и событие потеряно без единой ошибки.
 
+Токен — вторая половина безопасности лиза. Истёкший лиз отдаёт захват другому
+воркеру, но застывший когда-нибудь проснётся: без ограждения его `complete()`
+финализировал бы попытку, уже потерявшую захват, а `release()` — острая
+неисправность — удалил бы живой захват нового владельца и открыл третьей
+доставке путь к параллельной обработке. Поэтому оба финализатора сверяют токен
+с сохранённым значением и при несовпадении не делают ничего; перехват молча
+заменяет токен, и именно это превращает вызовы старого воркера в no-op.
+
 Если очередь живёт в той же БД, есть более простой вариант: коммитить строку
 захвата и строку очереди **одной транзакцией** — тогда «захват существует» уже
 означает «событие durable». Брокер (SQS, Redis) в эту транзакцию не входит, и
-таким развёртываниям нужен лиз плюс `complete()`.
+таким развёртываниям нужен лиз плюс `complete()` — и токен-ограждение, не
+дающее истёкшему лизу сломать перехват.
 
 ## Выбор политики подтверждения
 

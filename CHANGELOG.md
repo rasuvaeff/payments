@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.2.0 — 2026-08-20
+
+### Changed
+
+- **Breaking:** `WebhookEventStoreInterface::claim()` now returns
+  `?WebhookClaimToken` instead of `bool`, and `complete()`/`release()` require
+  the token as a third argument. Both finalisers must be no-ops when the token
+  no longer matches the stored claim. This fences claim ownership: with
+  lease-based expiry a stalled worker whose claim was taken over could
+  otherwise finalise an attempt it no longer owns — and its `release()` would
+  delete the new owner's live claim, letting a third delivery start processing
+  concurrently. `WebhookProcessor` threads the token from `claim()` through to
+  both finalisers; implementations mint a token per claim
+  (`WebhookClaimToken::generate()`) and compare it before acting. Same-store
+  claims with no expiry semantics are unaffected beyond the signature change.
+
+### Added
+
+- `WebhookClaimToken`: opaque claim-ownership token — non-empty URL-safe value
+  of at most 128 bytes, `generate()` factory (128 bits of entropy) and
+  constant-time `equals()`.
+
 ## 0.1.0 — 2026-08-19
 
 Initial release.

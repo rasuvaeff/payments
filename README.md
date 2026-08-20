@@ -327,7 +327,7 @@ header:
 | Provider failures | `PaymentException`, `UnauthorizedException`, `ForbiddenException`, `NotFoundException`, `RateLimitedException`, `ProviderDeclinedException`, `RefundFailedException`, `ServerException` |
 | Webhook input/results | `WebhookInput`, `WebhookValidationResult`, `ValidWebhook`, `InvalidWebhook`, `WebhookProcessingResult`, `ProcessedWebhook`, `WebhookValidationFailed`, `UnknownWebhookEvent`, `UnsupportedWebhookEvent`, `RejectedWebhookEvent`, `ReplayedWebhookEvent`, `WebhookAcknowledgementPolicy` |
 | Webhook adapter contracts | `WebhookValidatorInterface`, `WebhookEventTypeExtractorInterface`, `WebhookEventRecognizerInterface`, `WebhookPayloadMapperInterface`, `UnsupportedWebhookEventException` |
-| Webhook persistence contracts | `WebhookEventStoreInterface`, `WebhookEventQueueInterface`, `WebhookReconcilerInterface`, `WebhookEventAcceptanceInterface` |
+| Webhook persistence contracts | `WebhookEventStoreInterface`, `WebhookClaimToken`, `WebhookEventQueueInterface`, `WebhookReconcilerInterface`, `WebhookEventAcceptanceInterface` |
 | Webhook orchestration | `WebhookProcessorInterface`, `WebhookProcessor`, `QueuedWebhookEventAcceptance`, `SynchronousWebhookEventAcceptance` |
 | Webhook HTTP | `WebhookProcessorRegistry`, `WebhookProcessorRegistration`, `WebhookController` |
 
@@ -357,7 +357,7 @@ stack):
 
 | You provide | Why it is yours |
 |---|---|
-| `WebhookEventStoreInterface` | Atomic `claim()`/`complete()`/`release()` over your database or Redis — replay protection is a storage decision |
+| `WebhookEventStoreInterface` | Atomic `claim()`/`complete()`/`release()` fenced by a `WebhookClaimToken` over your database or Redis — replay protection is a storage decision |
 | `WebhookEventQueueInterface` **or** `WebhookReconcilerInterface` | The durable boundary: a queue for `AfterValidation`, an authoritative re-fetch + persistence flow for `AfterPersistence` |
 | Intent/attempt persistence | `PaymentIntent`/`PaymentAttempt` projections; adapters only return attempts |
 | `GatewaySelectionPolicyInterface` | Business routing (or `FixedGatewaySelectionPolicy` for a single provider) |
@@ -398,8 +398,8 @@ queue receives only `ObservedPaymentEvent`, whose payload must already be
 sanitized by the provider mapper.
 
 `WebhookEventStoreInterface` has three calls, and all three matter. `claim()`
-must be atomic. `complete()` marks the event final. `release()` makes ordinary
-processing failures retryable.
+must be atomic and returns a `WebhookClaimToken`; `complete()` marks the event
+final; `release()` makes ordinary processing failures retryable.
 
 `complete()` is what makes stale-claim recovery possible. A process can die
 between `claim()` and the end of processing without reaching `release()` —
@@ -412,6 +412,12 @@ expire them and the interrupted event is answered with a replay outcome — HTTP
 anywhere. With `complete()` the rule is unambiguous: a claim that was never
 completed and whose lease expired is stale and must be reclaimable; a completed
 claim is never handed out again.
+
+The token is the fence that makes lease expiry safe. `complete()` and
+`release()` must compare it against the stored claim and do nothing on a
+mismatch: a worker whose lease expired and whose claim was taken over holds a
+stale token, and its `release()` must never delete the live claim of the new
+owner — that would let a third delivery start processing concurrently.
 
 If the durable queue lives in the same database, there is a simpler option:
 commit the claim row and the queue row in one transaction, so that "a claim

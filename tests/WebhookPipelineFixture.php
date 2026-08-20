@@ -14,6 +14,7 @@ use Rasuvaeff\Payments\PaymentState;
 use Rasuvaeff\Payments\ProviderEventType;
 use Rasuvaeff\Payments\UnsupportedWebhookEventException;
 use Rasuvaeff\Payments\ValidWebhook;
+use Rasuvaeff\Payments\WebhookClaimToken;
 use Rasuvaeff\Payments\WebhookEventQueueInterface;
 use Rasuvaeff\Payments\WebhookEventRecognizerInterface;
 use Rasuvaeff\Payments\WebhookEventStoreInterface;
@@ -46,6 +47,9 @@ final class WebhookPipelineFixture implements
     public bool $acceptanceFails = false;
     public bool $releaseFails = false;
     public ?ObservedPaymentEvent $acceptedEvent = null;
+    public ?WebhookClaimToken $issuedToken = null;
+    public ?WebhookClaimToken $completedWithToken = null;
+    public ?WebhookClaimToken $releasedWithToken = null;
 
     /** @var list<string> */
     public array $calls = [];
@@ -110,23 +114,29 @@ final class WebhookPipelineFixture implements
     }
 
     #[\Override]
-    public function claim(PaymentProvider $provider, string $providerEventId): bool
+    public function claim(PaymentProvider $provider, string $providerEventId): ?WebhookClaimToken
     {
         $this->calls[] = 'claim';
 
-        return $this->claimResult;
+        if (!$this->claimResult) {
+            return null;
+        }
+
+        return $this->issuedToken ??= WebhookClaimToken::generate();
     }
 
     #[\Override]
-    public function complete(PaymentProvider $provider, string $providerEventId): void
+    public function complete(PaymentProvider $provider, string $providerEventId, WebhookClaimToken $token): void
     {
         $this->calls[] = 'complete';
+        $this->completedWithToken = $token;
     }
 
     #[\Override]
-    public function release(PaymentProvider $provider, string $providerEventId): void
+    public function release(PaymentProvider $provider, string $providerEventId, WebhookClaimToken $token): void
     {
         $this->calls[] = 'release';
+        $this->releasedWithToken = $token;
 
         if ($this->releaseFails) {
             throw new \RuntimeException('Releasing the claim failed');
