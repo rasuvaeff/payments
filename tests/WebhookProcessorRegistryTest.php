@@ -5,10 +5,10 @@ declare(strict_types=1);
 namespace Rasuvaeff\Payments\Tests;
 
 use Rasuvaeff\Payments\PaymentProvider;
-use Rasuvaeff\Payments\Tests\Support\FakeWebhookProcessor;
+use Rasuvaeff\Payments\WebhookProcessorInterface;
 use Rasuvaeff\Payments\WebhookProcessorRegistration;
 use Rasuvaeff\Payments\WebhookProcessorRegistry;
-use Rasuvaeff\Payments\WebhookValidationFailed;
+use Rasuvaeff\Understudy\Understudy;
 use Testo\Assert;
 use Testo\Codecov\Covers;
 use Testo\Expect;
@@ -22,7 +22,7 @@ final class WebhookProcessorRegistryTest
     public function indexesProcessorByProvider(): void
     {
         $provider = new PaymentProvider(value: 'stripe');
-        $processor = new FakeWebhookProcessor(result: new WebhookValidationFailed(reason: 'test'));
+        $processor = Understudy::for(WebhookProcessorInterface::class);
         $registry = new WebhookProcessorRegistry(processors: [
             new WebhookProcessorRegistration(provider: $provider, processor: $processor),
         ]);
@@ -36,7 +36,7 @@ final class WebhookProcessorRegistryTest
         $provider = new PaymentProvider(value: 'stripe');
         $registration = new WebhookProcessorRegistration(
             provider: $provider,
-            processor: new FakeWebhookProcessor(result: new WebhookValidationFailed(reason: 'test')),
+            processor: Understudy::for(WebhookProcessorInterface::class),
         );
 
         Expect::exception(\InvalidArgumentException::class)->withMessage('Duplicate webhook processor for provider "stripe"');

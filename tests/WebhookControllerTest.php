@@ -14,20 +14,26 @@ use Rasuvaeff\Payments\ProcessedWebhook;
 use Rasuvaeff\Payments\ProviderEventType;
 use Rasuvaeff\Payments\RejectedWebhookEvent;
 use Rasuvaeff\Payments\ReplayedWebhookEvent;
-use Rasuvaeff\Payments\Tests\Support\FakeWebhookProcessor;
 use Rasuvaeff\Payments\Tests\Support\UnknownProcessingResult;
 use Rasuvaeff\Payments\UnknownWebhookEvent;
 use Rasuvaeff\Payments\UnsupportedWebhookEvent;
 use Rasuvaeff\Payments\WebhookAcknowledgementPolicy;
 use Rasuvaeff\Payments\WebhookController;
+use Rasuvaeff\Payments\WebhookInput;
 use Rasuvaeff\Payments\WebhookProcessingResult;
+use Rasuvaeff\Payments\WebhookProcessorInterface;
 use Rasuvaeff\Payments\WebhookProcessorRegistration;
 use Rasuvaeff\Payments\WebhookProcessorRegistry;
 use Rasuvaeff\Payments\WebhookValidationFailed;
+use Rasuvaeff\Understudy\Arg;
+use Rasuvaeff\Understudy\Understudy;
 use Testo\Assert;
 use Testo\Codecov\Covers;
 use Testo\Data\DataProvider;
 use Testo\Test;
+
+use function Rasuvaeff\Understudy\verify;
+use function Rasuvaeff\Understudy\when;
 
 #[Test]
 #[Covers(WebhookController::class)]
@@ -37,7 +43,9 @@ final class WebhookControllerTest
     public function mapsProcessingResultsToSafeResponses(WebhookProcessingResult $result, int $status, string $outcome): void
     {
         $provider = new PaymentProvider(value: 'stripe');
-        $processor = new FakeWebhookProcessor(result: $result);
+        $processor = Understudy::for(WebhookProcessorInterface::class);
+        $inputs = Arg::captor(WebhookInput::class);
+        when(fn() => $processor->process($inputs->capture()))->returns($result);
         $controller = $this->controller(provider: $provider, processor: $processor);
         $request = (new ServerRequest(method: 'POST', uri: '/webhooks/stripe', body: '{"id":"evt_1"}'))
             ->withHeader('Stripe-Signature', 'secret-signature');
@@ -47,10 +55,11 @@ final class WebhookControllerTest
         Assert::same($response->getStatusCode(), $status);
         Assert::same($response->getHeaderLine('X-Payments-Webhook-Outcome'), $outcome);
         Assert::same((string) $response->getBody(), '');
-        Assert::same($processor->input?->rawBody, '{"id":"evt_1"}');
-        Assert::same($processor->input?->header(name: 'Stripe-Signature'), ['secret-signature']);
-        Assert::same($processor->input?->requestMetadata()['path'] ?? null, '/webhooks/stripe');
-        Assert::same($processor->input?->requestMetadata()['method'] ?? null, 'POST');
+        verify(fn() => $processor->process(Arg::any()), times: 1);
+        Assert::same($inputs->last()->rawBody, '{"id":"evt_1"}');
+        Assert::same($inputs->last()->header(name: 'Stripe-Signature'), ['secret-signature']);
+        Assert::same($inputs->last()->requestMetadata()['path'] ?? null, '/webhooks/stripe');
+        Assert::same($inputs->last()->requestMetadata()['method'] ?? null, 'POST');
     }
 
     /**
@@ -62,7 +71,7 @@ final class WebhookControllerTest
     public function reportsAnEmptyBodyAsItsOwnOutcome(): void
     {
         $provider = new PaymentProvider(value: 'stripe');
-        $processor = new FakeWebhookProcessor(result: new ReplayedWebhookEvent(providerEventId: 'evt_1'));
+        $processor = Understudy::for(WebhookProcessorInterface::class);
         $controller = $this->controller(provider: $provider, processor: $processor);
 
         $response = $controller->handle(
@@ -72,7 +81,7 @@ final class WebhookControllerTest
 
         Assert::same($response->getStatusCode(), 400);
         Assert::same($response->getHeaderLine('X-Payments-Webhook-Outcome'), 'empty_body');
-        Assert::null($processor->input);
+        Understudy::unused($processor);
     }
 
     public function returnsNotFoundWithoutInvokingAProcessor(): void
@@ -128,7 +137,7 @@ final class WebhookControllerTest
         yield 'extension result' => [new UnknownProcessingResult(), 500, 'processing_failed'];
     }
 
-    private function controller(PaymentProvider $provider, FakeWebhookProcessor $processor): WebhookController
+    private function controller(PaymentProvider $provider, WebhookProcessorInterface $processor): WebhookController
     {
         return new WebhookController(
             registry: new WebhookProcessorRegistry(processors: [

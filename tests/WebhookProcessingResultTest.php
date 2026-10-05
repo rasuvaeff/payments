@@ -4,7 +4,12 @@ declare(strict_types=1);
 
 namespace Rasuvaeff\Payments\Tests;
 
+use Rasuvaeff\Payments\ObservedPaymentEvent;
+use Rasuvaeff\Payments\PaymentProvider;
+use Rasuvaeff\Payments\PaymentReference;
+use Rasuvaeff\Payments\PaymentState;
 use Rasuvaeff\Payments\ProcessedWebhook;
+use Rasuvaeff\Payments\ProviderEventType;
 use Rasuvaeff\Payments\RejectedWebhookEvent;
 use Rasuvaeff\Payments\ReplayedWebhookEvent;
 use Rasuvaeff\Payments\UnknownWebhookEvent;
@@ -30,7 +35,7 @@ final class WebhookProcessingResultTest
 {
     public function processedResultKeepsEventAndPolicy(): void
     {
-        $event = (new WebhookPipelineFixture())->event();
+        $event = self::event();
         $result = new ProcessedWebhook(
             event: $event,
             acknowledgementPolicy: WebhookAcknowledgementPolicy::AfterValidation,
@@ -45,29 +50,29 @@ final class WebhookProcessingResultTest
 
     public function rejectionCarriesItsReasonAndOptionalType(): void
     {
-        $fixture = new WebhookPipelineFixture();
+        $type = self::type();
         $typed = new RejectedWebhookEvent(
             providerEventId: 'evt_1',
             reason: 'Amount precision is not supported',
-            type: $fixture->recognizedType,
+            type: $type,
         );
         $untyped = new RejectedWebhookEvent(providerEventId: 'evt_1', reason: 'Body is not an object');
 
         Assert::instanceOf($typed, WebhookProcessingResult::class);
         Assert::same($typed->providerEventId, 'evt_1');
         Assert::same($typed->reason, 'Amount precision is not supported');
-        Assert::same($typed->type, $fixture->recognizedType);
+        Assert::same($typed->type, $type);
         Assert::null($untyped->type);
     }
 
     public function nonProcessedOutcomesCarryTheirOwnFields(): void
     {
-        $fixture = new WebhookPipelineFixture();
+        $type = self::type();
         $validationFailed = new WebhookValidationFailed(reason: 'Invalid signature');
         $unknown = new UnknownWebhookEvent(providerEventId: 'evt_1', providerEventType: 'new.event');
         $unsupported = new UnsupportedWebhookEvent(
             providerEventId: 'evt_1',
-            type: $fixture->recognizedType,
+            type: $type,
             reason: 'Unsupported version',
         );
         $replayed = new ReplayedWebhookEvent(providerEventId: 'evt_1');
@@ -75,13 +80,12 @@ final class WebhookProcessingResultTest
         Assert::same($validationFailed->reason, 'Invalid signature');
         Assert::same($unknown->providerEventType, 'new.event');
         Assert::same($unsupported->reason, 'Unsupported version');
-        Assert::same($unsupported->type, $fixture->recognizedType);
+        Assert::same($unsupported->type, $type);
         Assert::same($replayed->providerEventId, 'evt_1');
     }
 
     public function acceptsMaximumValuesAndAbsentRawType(): void
     {
-        $fixture = new WebhookPipelineFixture();
         $eventId = str_repeat('e', 255);
         $eventType = str_repeat('t', 255);
         $reason = str_repeat('r', 1_024);
@@ -90,7 +94,7 @@ final class WebhookProcessingResultTest
         $unknownWithoutType = new UnknownWebhookEvent(providerEventId: $eventId);
         $unsupported = new UnsupportedWebhookEvent(
             providerEventId: $eventId,
-            type: $fixture->recognizedType,
+            type: self::type(),
             reason: $reason,
         );
         $replayed = new ReplayedWebhookEvent(providerEventId: $eventId);
@@ -116,7 +120,6 @@ final class WebhookProcessingResultTest
      */
     public static function invalidOutcomeProvider(): iterable
     {
-        $fixture = new WebhookPipelineFixture();
         $eventIdMessage = 'Provider event id must be non-empty and at most 255 bytes';
         $typeMessage = 'Provider event type must be non-empty and at most 255 bytes';
         $reasonMessage = 'Unsupported webhook event reason must be non-empty and at most 1024 bytes';
@@ -154,7 +157,7 @@ final class WebhookProcessingResultTest
         yield 'empty unsupported event id' => [
             static fn(): WebhookProcessingResult => new UnsupportedWebhookEvent(
                 providerEventId: '',
-                type: $fixture->recognizedType,
+                type: self::type(),
                 reason: 'Unsupported',
             ),
             $eventIdMessage,
@@ -162,7 +165,7 @@ final class WebhookProcessingResultTest
         yield 'blank unsupported reason' => [
             static fn(): WebhookProcessingResult => new UnsupportedWebhookEvent(
                 providerEventId: 'evt_1',
-                type: $fixture->recognizedType,
+                type: self::type(),
                 reason: '   ',
             ),
             $reasonMessage,
@@ -170,7 +173,7 @@ final class WebhookProcessingResultTest
         yield 'oversized unsupported reason' => [
             static fn(): WebhookProcessingResult => new UnsupportedWebhookEvent(
                 providerEventId: 'evt_1',
-                type: $fixture->recognizedType,
+                type: self::type(),
                 reason: str_repeat('r', 1_025),
             ),
             $reasonMessage,
@@ -205,5 +208,26 @@ final class WebhookProcessingResultTest
             static fn(): WebhookProcessingResult => new ReplayedWebhookEvent(providerEventId: str_repeat('e', 256)),
             $eventIdMessage,
         ];
+    }
+
+    private static function type(): ProviderEventType
+    {
+        return new ProviderEventType(
+            provider: new PaymentProvider(value: 'fixture'),
+            name: 'payment.succeeded',
+        );
+    }
+
+    private static function event(): ObservedPaymentEvent
+    {
+        return new ObservedPaymentEvent(
+            providerEventId: 'evt_1',
+            type: self::type(),
+            payment: new PaymentReference(provider: self::type()->provider, id: 'pay_1', kind: 'payment'),
+            state: PaymentState::Succeeded,
+            rawStatus: 'succeeded',
+            occurredAt: new \DateTimeImmutable('2026-08-03T12:00:00+00:00'),
+            payload: ['amount' => 1_200],
+        );
     }
 }
