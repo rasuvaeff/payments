@@ -5,7 +5,11 @@ declare(strict_types=1);
 namespace Rasuvaeff\Payments\Tests;
 
 use Rasuvaeff\Payments\InvalidWebhook;
+use Rasuvaeff\Payments\MalformedResponseException;
+use Rasuvaeff\Payments\ObservedPaymentEvent;
 use Rasuvaeff\Payments\PaymentProvider;
+use Rasuvaeff\Payments\PaymentReference;
+use Rasuvaeff\Payments\PaymentState;
 use Rasuvaeff\Payments\ProcessedWebhook;
 use Rasuvaeff\Payments\ProviderEventType;
 use Rasuvaeff\Payments\QueuedWebhookEventAcceptance;
@@ -15,15 +19,30 @@ use Rasuvaeff\Payments\SynchronousWebhookEventAcceptance;
 use Rasuvaeff\Payments\UnknownWebhookEvent;
 use Rasuvaeff\Payments\UnsupportedWebhookEvent;
 use Rasuvaeff\Payments\UnsupportedWebhookEventException;
+use Rasuvaeff\Payments\ValidWebhook;
 use Rasuvaeff\Payments\WebhookAcknowledgementPolicy;
+use Rasuvaeff\Payments\WebhookClaimToken;
 use Rasuvaeff\Payments\WebhookEventAcceptanceInterface;
+use Rasuvaeff\Payments\WebhookEventQueueInterface;
+use Rasuvaeff\Payments\WebhookEventRecognizerInterface;
+use Rasuvaeff\Payments\WebhookEventStoreInterface;
+use Rasuvaeff\Payments\WebhookEventTypeExtractorInterface;
 use Rasuvaeff\Payments\WebhookInput;
+use Rasuvaeff\Payments\WebhookPayloadMapperInterface;
 use Rasuvaeff\Payments\WebhookProcessor;
+use Rasuvaeff\Payments\WebhookReconcilerInterface;
 use Rasuvaeff\Payments\WebhookValidationFailed;
+use Rasuvaeff\Payments\WebhookValidatorInterface;
+use Rasuvaeff\Understudy\Arg;
+use Rasuvaeff\Understudy\Understudy;
 use Testo\Assert;
 use Testo\Codecov\Covers;
 use Testo\Expect;
+use Testo\Lifecycle\BeforeTest;
 use Testo\Test;
+
+use function Rasuvaeff\Understudy\verify;
+use function Rasuvaeff\Understudy\when;
 
 #[Test]
 #[Covers(WebhookProcessor::class)]
@@ -32,144 +51,196 @@ use Testo\Test;
 #[Covers(UnsupportedWebhookEventException::class)]
 final class WebhookProcessorTest
 {
+    private WebhookValidatorInterface $validator;
+
+    private WebhookEventTypeExtractorInterface $extractor;
+
+    private WebhookEventRecognizerInterface $recognizer;
+
+    private WebhookPayloadMapperInterface $mapper;
+
+    private WebhookEventStoreInterface $store;
+
+    private WebhookEventQueueInterface $queue;
+
+    private WebhookReconcilerInterface $reconciler;
+
+    private PaymentProvider $provider;
+
+    private ProviderEventType $type;
+
+    private ObservedPaymentEvent $mappedEvent;
+
+    private WebhookClaimToken $token;
+
+    #[BeforeTest]
+    public function setUp(): void
+    {
+        $this->validator = Understudy::for(WebhookValidatorInterface::class);
+        $this->extractor = Understudy::for(WebhookEventTypeExtractorInterface::class);
+        $this->recognizer = Understudy::for(WebhookEventRecognizerInterface::class);
+        $this->mapper = Understudy::for(WebhookPayloadMapperInterface::class);
+        $this->store = Understudy::for(WebhookEventStoreInterface::class);
+        $this->queue = Understudy::for(WebhookEventQueueInterface::class);
+        $this->reconciler = Understudy::for(WebhookReconcilerInterface::class);
+        $this->provider = new PaymentProvider(value: 'fixture');
+        $this->type = new ProviderEventType(provider: $this->provider, name: 'payment.succeeded');
+        $this->token = WebhookClaimToken::generate();
+    }
+
     public function processesInRequiredOrderAndDurablyEnqueues(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $result = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->stubPipeline();
+        $result = $this->queuedProcessor()->process(input: $this->input());
 
         Assert::instanceOf($result, ProcessedWebhook::class);
-        Assert::same($result->event, $fixture->mappedEvent);
+        Assert::same($result->event, $this->mappedEvent);
         Assert::same($result->acknowledgementPolicy, WebhookAcknowledgementPolicy::AfterValidation);
-        Assert::same($fixture->acceptedEvent, $fixture->mappedEvent);
-        Assert::same($fixture->completedWithToken, $fixture->issuedToken);
-        Assert::null($fixture->releasedWithToken);
-        Assert::same($fixture->calls, [
-            'provider',
-            'validate',
-            'claim',
-            'extract',
-            'recognize',
-            'map',
-            'enqueue',
-            'complete',
-        ]);
+        Understudy::verifySequence(
+            fn() => $this->validator->provider(),
+            fn() => $this->validator->validate(Arg::any()),
+            fn() => $this->store->claim(Arg::any(), Arg::any()),
+            fn() => $this->extractor->extract(Arg::any()),
+            fn() => $this->recognizer->recognize(Arg::any()),
+            fn() => $this->mapper->map(Arg::any(), Arg::any()),
+            fn() => $this->queue->enqueue($this->mappedEvent),
+            fn() => $this->store->complete(Arg::any(), Arg::any(), $this->token),
+        );
     }
 
     public function rejectsWrongProviderBeforeValidation(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $result = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input(provider: new PaymentProvider(value: 'other')));
+        $this->stubPipeline();
+        $result = $this->queuedProcessor()->process(input: $this->input(provider: new PaymentProvider(value: 'other')));
 
         Assert::instanceOf($result, WebhookValidationFailed::class);
-        Assert::same($fixture->calls, ['provider']);
+        Assert::same($result->reason, 'Webhook validator does not support the requested provider');
+        Understudy::verifySequence(
+            fn() => $this->validator->provider(),
+        );
     }
 
     public function validationFailureDoesNotClaimEvent(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->validation = new InvalidWebhook(reason: 'Invalid signature');
-        $result = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->stubPipeline();
+        when(fn() => $this->validator->validate(Arg::any()))->returns(new InvalidWebhook(reason: 'Invalid signature'));
+        $result = $this->queuedProcessor()->process(input: $this->input());
 
         Assert::instanceOf($result, WebhookValidationFailed::class);
         Assert::same($result->reason, 'Invalid signature');
-        Assert::same($fixture->calls, ['provider', 'validate']);
+        Understudy::verifySequence(
+            fn() => $this->validator->provider(),
+            fn() => $this->validator->validate(Arg::any()),
+        );
     }
 
     public function replayDoesNotRecognizeOrMapAgain(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->claimResult = false;
-        $result = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->stubPipeline();
+        when(fn() => $this->store->claim(Arg::any(), Arg::any()))->returns(null);
+        $result = $this->queuedProcessor()->process(input: $this->input());
 
         Assert::instanceOf($result, ReplayedWebhookEvent::class);
         Assert::same($result->providerEventId, 'evt_1');
-        Assert::same($fixture->calls, ['provider', 'validate', 'claim']);
+        Understudy::verifySequence(
+            fn() => $this->validator->provider(),
+            fn() => $this->validator->validate(Arg::any()),
+            fn() => $this->store->claim(Arg::any(), Arg::any()),
+        );
     }
 
     public function reportsMissingAndUnrecognizedEventTypes(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->rawEventType = null;
-        $missing = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->stubPipeline();
+        when(fn() => $this->extractor->extract(Arg::any()))->returns(null);
+        $missing = $this->queuedProcessor()->process(input: $this->input());
 
         Assert::instanceOf($missing, UnknownWebhookEvent::class);
-        Assert::same($fixture->calls, ['provider', 'validate', 'claim', 'extract', 'complete']);
+        Understudy::verifySequence(
+            fn() => $this->validator->provider(),
+            fn() => $this->validator->validate(Arg::any()),
+            fn() => $this->store->claim(Arg::any(), Arg::any()),
+            fn() => $this->extractor->extract(Arg::any()),
+            fn() => $this->store->complete(Arg::any(), Arg::any(), $this->token),
+        );
 
-        $fixture = new WebhookPipelineFixture();
-        $fixture->recognizesEvent = false;
-        $unknown = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        Understudy::checkpoint();
+
+        when(fn() => $this->extractor->extract(Arg::any()))->returns('payment.succeeded');
+        when(fn() => $this->recognizer->recognize(Arg::any()))->returns(null);
+        $unknown = $this->queuedProcessor()->process(input: $this->input());
 
         Assert::instanceOf($unknown, UnknownWebhookEvent::class);
         Assert::same($unknown->providerEventType, 'payment.succeeded');
-        Assert::same($fixture->calls, ['provider', 'validate', 'claim', 'extract', 'recognize', 'complete']);
+        Understudy::verifySequence(
+            fn() => $this->validator->provider(),
+            fn() => $this->validator->validate(Arg::any()),
+            fn() => $this->store->claim(Arg::any(), Arg::any()),
+            fn() => $this->extractor->extract(Arg::any()),
+            fn() => $this->recognizer->recognize(Arg::any()),
+            fn() => $this->store->complete(Arg::any(), Arg::any(), $this->token),
+        );
     }
 
     public function treatsBlankAndOversizedRawEventTypesAsUnknown(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->rawEventType = '   ';
-        $blank = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->stubPipeline();
+        when(fn() => $this->extractor->extract(Arg::any()))->returns('   ');
+        $blank = $this->queuedProcessor()->process(input: $this->input());
 
         Assert::instanceOf($blank, UnknownWebhookEvent::class);
-        Assert::same($fixture->calls, ['provider', 'validate', 'claim', 'extract', 'complete']);
+        Understudy::verifySequence(
+            fn() => $this->validator->provider(),
+            fn() => $this->validator->validate(Arg::any()),
+            fn() => $this->store->claim(Arg::any(), Arg::any()),
+            fn() => $this->extractor->extract(Arg::any()),
+            fn() => $this->store->complete(Arg::any(), Arg::any(), $this->token),
+        );
 
-        $fixture = new WebhookPipelineFixture();
-        $fixture->rawEventType = str_repeat('t', 256);
-        $oversized = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        Understudy::checkpoint();
+
+        when(fn() => $this->extractor->extract(Arg::any()))->returns(str_repeat('t', 256));
+        $oversized = $this->queuedProcessor()->process(input: $this->input());
 
         Assert::instanceOf($oversized, UnknownWebhookEvent::class);
-        Assert::same($fixture->calls, ['provider', 'validate', 'claim', 'extract', 'complete']);
+        Understudy::verifySequence(
+            fn() => $this->validator->provider(),
+            fn() => $this->validator->validate(Arg::any()),
+            fn() => $this->store->claim(Arg::any(), Arg::any()),
+            fn() => $this->extractor->extract(Arg::any()),
+            fn() => $this->store->complete(Arg::any(), Arg::any(), $this->token),
+        );
     }
 
     public function acceptsMaximumRawEventTypeLength(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->rawEventType = str_repeat('t', 255);
-        $result = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->stubPipeline();
+        when(fn() => $this->extractor->extract(Arg::any()))->returns(str_repeat('t', 255));
+        $result = $this->queuedProcessor()->process(input: $this->input());
 
         Assert::instanceOf($result, ProcessedWebhook::class);
-        Assert::same($fixture->calls, ['provider', 'validate', 'claim', 'extract', 'recognize', 'map', 'enqueue', 'complete']);
+        Understudy::verifySequence(
+            fn() => $this->validator->provider(),
+            fn() => $this->validator->validate(Arg::any()),
+            fn() => $this->store->claim(Arg::any(), Arg::any()),
+            fn() => $this->extractor->extract(Arg::any()),
+            fn() => $this->recognizer->recognize(Arg::any()),
+            fn() => $this->mapper->map(Arg::any(), Arg::any()),
+            fn() => $this->queue->enqueue($this->mappedEvent),
+            fn() => $this->store->complete(Arg::any(), Arg::any(), $this->token),
+        );
     }
 
     public function reportsIntentionallyUnsupportedMapping(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->unsupported = true;
-        $result = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->stubPipeline();
+        when(fn() => $this->mapper->map(Arg::any(), Arg::any()))
+            ->throws(new UnsupportedWebhookEventException('Event payload version is unsupported'));
+        $result = $this->queuedProcessor()->process(input: $this->input());
 
         Assert::instanceOf($result, UnsupportedWebhookEvent::class);
         Assert::same($result->reason, 'Event payload version is unsupported');
-        Assert::null($fixture->acceptedEvent);
+        verify(fn() => $this->queue->enqueue(Arg::any()), never: true);
     }
 
     /**
@@ -180,31 +251,32 @@ final class WebhookProcessorTest
      */
     public function rejectsPermanentlyUnmappablePayloadsWithoutRetry(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->malformed = true;
-        $result = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->stubPipeline();
+        when(fn() => $this->mapper->map(Arg::any(), Arg::any()))
+            ->throws(new MalformedResponseException('Amount precision is not supported'));
+        $result = $this->queuedProcessor()->process(input: $this->input());
 
         Assert::instanceOf($result, RejectedWebhookEvent::class);
         Assert::same($result->reason, 'Amount precision is not supported');
         Assert::same($result->type?->name, 'payment.succeeded');
         Assert::same($result->providerEventId, 'evt_1');
-        Assert::null($fixture->acceptedEvent);
-        Assert::same($fixture->calls, ['provider', 'validate', 'claim', 'extract', 'recognize', 'map', 'complete']);
-        Assert::false(in_array('release', $fixture->calls, strict: true));
+        verify(fn() => $this->queue->enqueue(Arg::any()), never: true);
+        Understudy::verifySequence(
+            fn() => $this->validator->provider(),
+            fn() => $this->validator->validate(Arg::any()),
+            fn() => $this->store->claim(Arg::any(), Arg::any()),
+            fn() => $this->extractor->extract(Arg::any()),
+            fn() => $this->recognizer->recognize(Arg::any()),
+            fn() => $this->mapper->map(Arg::any(), Arg::any()),
+            fn() => $this->store->complete(Arg::any(), Arg::any(), $this->token),
+        );
     }
 
     public function suppliesSafeFallbackForEmptyMalformedReason(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->malformed = true;
-        $fixture->malformedReason = '';
-        $result = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->stubPipeline();
+        when(fn() => $this->mapper->map(Arg::any(), Arg::any()))->throws(new MalformedResponseException(''));
+        $result = $this->queuedProcessor()->process(input: $this->input());
 
         Assert::instanceOf($result, RejectedWebhookEvent::class);
         Assert::same($result->reason, 'Webhook payload cannot be mapped');
@@ -217,19 +289,14 @@ final class WebhookProcessorTest
      */
     public function completesTheClaimOnlyAfterDurableAcceptance(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->acceptanceFails = true;
+        $this->stubPipeline();
+        when(fn() => $this->queue->enqueue(Arg::any()))->throws(new \RuntimeException('Durable acceptance failed'));
 
         try {
-            $this->processor(
-                fixture: $fixture,
-                acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-            )->process(input: $this->input());
+            $this->queuedProcessor()->process(input: $this->input());
         } catch (\RuntimeException) {
-            Assert::false(in_array('complete', $fixture->calls, strict: true));
-            Assert::true(in_array('release', $fixture->calls, strict: true));
-            Assert::same($fixture->releasedWithToken, $fixture->issuedToken);
-            Assert::null($fixture->completedWithToken);
+            verify(fn() => $this->store->complete(Arg::any(), Arg::any(), Arg::any()), never: true);
+            verify(fn() => $this->store->release(Arg::any(), Arg::any(), $this->token), times: 1);
 
             return;
         }
@@ -239,27 +306,20 @@ final class WebhookProcessorTest
 
     public function doesNotCompleteAClaimItDidNotWin(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->claimResult = false;
-        $result = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->stubPipeline();
+        when(fn() => $this->store->claim(Arg::any(), Arg::any()))->returns(null);
+        $result = $this->queuedProcessor()->process(input: $this->input());
 
         Assert::instanceOf($result, ReplayedWebhookEvent::class);
-        Assert::false(in_array('complete', $fixture->calls, strict: true));
-        Assert::false(in_array('release', $fixture->calls, strict: true));
+        verify(fn() => $this->store->complete(Arg::any(), Arg::any(), Arg::any()), never: true);
+        verify(fn() => $this->store->release(Arg::any(), Arg::any(), Arg::any()), never: true);
     }
 
     public function suppliesSafeFallbackForEmptyUnsupportedReason(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->unsupported = true;
-        $fixture->unsupportedReason = '';
-        $result = $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->stubPipeline();
+        when(fn() => $this->mapper->map(Arg::any(), Arg::any()))->throws(new UnsupportedWebhookEventException(''));
+        $result = $this->queuedProcessor()->process(input: $this->input());
 
         Assert::instanceOf($result, UnsupportedWebhookEvent::class);
         Assert::same($result->reason, 'Webhook event is unsupported');
@@ -267,60 +327,62 @@ final class WebhookProcessorTest
 
     public function rejectsRecognizerProviderMismatch(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->recognizedType = new ProviderEventType(
-            provider: new PaymentProvider(value: 'other'),
-            name: 'payment.succeeded',
+        $this->stubPipeline();
+        when(fn() => $this->recognizer->recognize(Arg::any()))->returns(
+            new ProviderEventType(
+                provider: new PaymentProvider(value: 'other'),
+                name: 'payment.succeeded',
+            ),
         );
+        $this->forbidAcceptance();
 
         Expect::exception(\LogicException::class)->withMessage('Recognized webhook event type uses another provider');
-        $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->queuedProcessor()->process(input: $this->input());
     }
 
     public function rejectsMappedEventIdentityMismatch(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->mappedEvent = $fixture->event(providerEventId: 'evt_other');
+        $this->stubPipeline();
+        when(fn() => $this->mapper->map(Arg::any(), Arg::any()))->returns($this->event(providerEventId: 'evt_other'));
+        $this->forbidAcceptance();
 
         Expect::exception(\LogicException::class)->withMessage('Mapped webhook event id does not match validated event id');
-        $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->queuedProcessor()->process(input: $this->input());
     }
 
     public function rejectsMappedEventTypeMismatch(): void
     {
-        $fixture = new WebhookPipelineFixture();
+        $this->stubPipeline();
         $mappedType = new ProviderEventType(
-            provider: $fixture->paymentProvider,
+            provider: $this->provider,
             name: 'payment.processing',
         );
-        $fixture->mappedEvent = $fixture->event(type: $mappedType);
+        when(fn() => $this->mapper->map(Arg::any(), Arg::any()))->returns($this->event(type: $mappedType));
+        $this->forbidAcceptance();
 
         Expect::exception(\LogicException::class)->withMessage('Mapped webhook event type does not match recognized event type');
-        $this->processor(
-            fixture: $fixture,
-            acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-        )->process(input: $this->input());
+        $this->queuedProcessor()->process(input: $this->input());
     }
 
     public function doesNotReturnProcessedWhenDurableAcceptanceFails(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->acceptanceFails = true;
+        $this->stubPipeline();
+        when(fn() => $this->queue->enqueue(Arg::any()))->throws(new \RuntimeException('Durable acceptance failed'));
 
         try {
-            $this->processor(
-                fixture: $fixture,
-                acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-            )->process(input: $this->input());
+            $this->queuedProcessor()->process(input: $this->input());
         } catch (\RuntimeException $exception) {
             Assert::same($exception->getMessage(), 'Durable acceptance failed');
-            Assert::same($fixture->calls, ['provider', 'validate', 'claim', 'extract', 'recognize', 'map', 'enqueue', 'release']);
+            Understudy::verifySequence(
+                fn() => $this->validator->provider(),
+                fn() => $this->validator->validate(Arg::any()),
+                fn() => $this->store->claim(Arg::any(), Arg::any()),
+                fn() => $this->extractor->extract(Arg::any()),
+                fn() => $this->recognizer->recognize(Arg::any()),
+                fn() => $this->mapper->map(Arg::any(), Arg::any()),
+                fn() => $this->queue->enqueue($this->mappedEvent),
+                fn() => $this->store->release(Arg::any(), Arg::any(), $this->token),
+            );
 
             return;
         }
@@ -330,15 +392,13 @@ final class WebhookProcessorTest
 
     public function keepsTheProcessingFailureWhenReleasingTheClaimAlsoFails(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $fixture->acceptanceFails = true;
-        $fixture->releaseFails = true;
+        $this->stubPipeline();
+        when(fn() => $this->queue->enqueue(Arg::any()))->throws(new \RuntimeException('Durable acceptance failed'));
+        when(fn() => $this->store->release(Arg::any(), Arg::any(), Arg::any()))
+            ->throws(new \RuntimeException('Releasing the claim failed'));
 
         try {
-            $this->processor(
-                fixture: $fixture,
-                acceptance: new QueuedWebhookEventAcceptance(queue: $fixture),
-            )->process(input: $this->input());
+            $this->queuedProcessor()->process(input: $this->input());
         } catch (\RuntimeException $exception) {
             Assert::same($exception->getMessage(), 'Releasing the webhook claim failed: Releasing the claim failed');
             Assert::same($exception->getPrevious()?->getMessage(), 'Durable acceptance failed');
@@ -351,28 +411,71 @@ final class WebhookProcessorTest
 
     public function supportsAcknowledgementAfterSynchronousPersistence(): void
     {
-        $fixture = new WebhookPipelineFixture();
-        $result = $this->processor(
-            fixture: $fixture,
-            acceptance: new SynchronousWebhookEventAcceptance(reconciler: $fixture),
-        )->process(input: $this->input());
+        $this->stubPipeline();
+        $result = $this->synchronousProcessor()->process(input: $this->input());
 
         Assert::instanceOf($result, ProcessedWebhook::class);
         Assert::same($result->acknowledgementPolicy, WebhookAcknowledgementPolicy::AfterPersistence);
-        Assert::same($fixture->completedWithToken, $fixture->issuedToken);
-        Assert::same($fixture->calls, ['provider', 'validate', 'claim', 'extract', 'recognize', 'map', 'reconcile', 'complete']);
+        Understudy::verifySequence(
+            fn() => $this->validator->provider(),
+            fn() => $this->validator->validate(Arg::any()),
+            fn() => $this->store->claim(Arg::any(), Arg::any()),
+            fn() => $this->extractor->extract(Arg::any()),
+            fn() => $this->recognizer->recognize(Arg::any()),
+            fn() => $this->mapper->map(Arg::any(), Arg::any()),
+            fn() => $this->reconciler->reconcile($this->mappedEvent),
+            fn() => $this->store->complete(Arg::any(), Arg::any(), $this->token),
+        );
     }
 
-    private function processor(
-        WebhookPipelineFixture $fixture,
-        WebhookEventAcceptanceInterface $acceptance,
-    ): WebhookProcessor {
+    /**
+     * The pipeline defaults answer the happy path: a validator for the
+     * fixture provider, a valid `evt_1`, a recognized `payment.succeeded`
+     * that maps to the default event, and a won claim. Every test narrows
+     * these stubs for its own scenario; a stub registered later for the same
+     * call wins.
+     */
+    private function stubPipeline(): void
+    {
+        $this->mappedEvent = $this->event();
+        when(fn() => $this->validator->provider())->returns($this->provider);
+        when(fn() => $this->validator->validate(Arg::any()))->returns(new ValidWebhook(providerEventId: 'evt_1'));
+        when(fn() => $this->extractor->extract(Arg::any()))->returns('payment.succeeded');
+        when(fn() => $this->recognizer->recognize(Arg::any()))->returns($this->type);
+        when(fn() => $this->mapper->map(Arg::any(), Arg::any()))->returns($this->mappedEvent);
+        when(fn() => $this->store->claim(Arg::any(), Arg::any()))->returns($this->token);
+    }
+
+    /**
+     * The body of a mismatch test ends in the expected `LogicException`, so
+     * no verify can run afterwards: the acceptance collaborators become
+     * strict instead, and a call the pipeline is not allowed to make fails
+     * at the call itself.
+     */
+    private function forbidAcceptance(): void
+    {
+        Understudy::strict($this->queue);
+        Understudy::strict($this->reconciler);
+    }
+
+    private function queuedProcessor(): WebhookProcessor
+    {
+        return $this->processor(new QueuedWebhookEventAcceptance(queue: $this->queue));
+    }
+
+    private function synchronousProcessor(): WebhookProcessor
+    {
+        return $this->processor(new SynchronousWebhookEventAcceptance(reconciler: $this->reconciler));
+    }
+
+    private function processor(WebhookEventAcceptanceInterface $acceptance): WebhookProcessor
+    {
         return new WebhookProcessor(
-            validator: $fixture,
-            eventTypeExtractor: $fixture,
-            eventRecognizer: $fixture,
-            payloadMapper: $fixture,
-            eventStore: $fixture,
+            validator: $this->validator,
+            eventTypeExtractor: $this->extractor,
+            eventRecognizer: $this->recognizer,
+            payloadMapper: $this->mapper,
+            eventStore: $this->store,
             eventAcceptance: $acceptance,
         );
     }
@@ -381,9 +484,26 @@ final class WebhookProcessorTest
     {
         return new WebhookInput(
             rawBody: '{"id":"evt_1","type":"payment.succeeded"}',
-            provider: $provider ?? new PaymentProvider(value: 'fixture'),
+            provider: $provider ?? $this->provider,
             headers: ['X-Signature' => 'test-signature'],
             requestMetadata: ['request_id' => 'request-1'],
+        );
+    }
+
+    private function event(
+        string $providerEventId = 'evt_1',
+        ?ProviderEventType $type = null,
+    ): ObservedPaymentEvent {
+        $type ??= $this->type;
+
+        return new ObservedPaymentEvent(
+            providerEventId: $providerEventId,
+            type: $type,
+            payment: new PaymentReference(provider: $type->provider, id: 'pay_1', kind: 'payment'),
+            state: PaymentState::Succeeded,
+            rawStatus: 'succeeded',
+            occurredAt: new \DateTimeImmutable('2026-08-03T12:00:00+00:00'),
+            payload: ['amount' => 1_200],
         );
     }
 }
