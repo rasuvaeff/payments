@@ -63,8 +63,10 @@ final readonly class Money
         return new self(minorUnits: $this->minorUnits - $other->minorUnits, currency: $this->currency);
     }
 
-    public function multiply(int $numerator, int $denominator = 1): self
-    {
+    public function multiply(
+        int $numerator,
+        int $denominator = 1,
+    ): self {
         Assert::nonNegative(value: $numerator, name: 'Money multiplier numerator');
         Assert::positive(value: $denominator, name: 'Money multiplier denominator');
 

@@ -9,5 +9,7 @@ namespace Rasuvaeff\Payments;
  */
 final readonly class WebhookCapability implements Capability
 {
-    public function __construct(public bool $signatureRequired = true) {}
+    public function __construct(
+        public bool $signatureRequired = true,
+    ) {}
 }

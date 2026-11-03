@@ -151,6 +151,44 @@ final class PaymentGatewayRouterTest
         ));
     }
 
+    public function rejectsUnsupportedConfirmationCancellationAndRefunds(): void
+    {
+        $provider = new PaymentProvider(value: 'basic');
+        $router = new PaymentGatewayRouter(
+            registry: new GatewayRegistry(gateways: [$this->basicGateway(provider: $provider)]),
+            selectionPolicy: new FixedGatewaySelectionPolicy(provider: $provider),
+        );
+        $payment = new PaymentReference(provider: $provider, id: 'pay_1');
+        $refund = new RefundReference(provider: $provider, id: 'ref_1');
+
+        foreach (
+            [
+                'confirmation' => static fn() => $router->confirmPayment(
+                    new PaymentOperationRequest(operationId: new OperationId(value: 'op'), payment: $payment),
+                ),
+                'cancellation' => static fn() => $router->cancelPayment(
+                    new PaymentOperationRequest(operationId: new OperationId(value: 'op'), payment: $payment),
+                ),
+                'refund' => static fn() => $router->createRefund(
+                    new CreateRefundRequest(operationId: new OperationId(value: 'op'), payment: $payment),
+                ),
+                'refund ' => static fn() => $router->retrieveRefund(
+                    new RetrieveRefundRequest(operationId: new OperationId(value: 'op'), refund: $refund),
+                ),
+            ] as $operation => $call
+        ) {
+            try {
+                $call();
+                Assert::fail('Expected a LogicException for ' . $operation);
+            } catch (\LogicException $e) {
+                Assert::same(
+                    $e->getMessage(),
+                    sprintf('Payment gateway "basic" does not support %s', trim($operation)),
+                );
+            }
+        }
+    }
+
     /**
      * The router dispatches by interface, so the fixture gateway doubles all
      * five ISP contracts at once and answers every operation with a canned
