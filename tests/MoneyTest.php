@@ -251,4 +251,11 @@ final class MoneyTest
         (new Money(minorUnits: 1000, currency: 'USD'))->isLessThan(new Money(minorUnits: 1000, currency: 'EUR'));
     }
 
+    public function roundingUpPastTheMaximumOverflows(): void
+    {
+        // 4294967295 * 4294967297 / 2 = PHP_INT_MAX + 0.5, which rounds half up to PHP_INT_MAX + 1
+        Expect::exception(\OverflowException::class)->withMessage('Money multiplication overflow');
+
+        (new Money(minorUnits: 4_294_967_295, currency: 'EUR'))->multiply(numerator: 4_294_967_297, denominator: 2);
+    }
 }

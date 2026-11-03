@@ -115,6 +115,7 @@ final class WebhookInputTest
     public static function invalidInputProvider(): iterable
     {
         yield 'invalid header name' => [['bad header' => 'value'], []];
+        yield 'numeric header name' => [[5 => 'value'], []];
         yield 'carriage return injection' => [['x-value' => "value\rinjected"], []];
         yield 'line feed injection' => [['x-value' => "value\ninjected"], []];
         yield 'header injection' => [['x-value' => "value\r\ninjected"], []];
