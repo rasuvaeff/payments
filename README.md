@@ -19,7 +19,7 @@ provider-specific status semantics.
 
 ## Requirements
 
-PHP 8.3+. A PSR-18 client with PSR-17 factories for outbound provider calls;
+PHP 8.3 – 8.6. A PSR-18 client with PSR-17 factories for outbound provider calls;
 PSR-7/PSR-17 messages for the webhook controller.
 
 ## Installation

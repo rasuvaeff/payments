@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 - `composer mutation` now runs Infection with `--with-uncovered`, so code the tests execute without naming it in `#[Covers]` is mutated and counted (overall MSI was 83% when measured this way, now 100% against `minMsi` 100). Added `AssertTest` (every guard in `Internal\Assert`, boundaries and exact messages), `PaymentExceptionTest`, a `Money::multiply()` round-up overflow case, a numeric webhook header name case, and unsupported confirmation/cancellation/refund cases for `PaymentGatewayRouter`. `infection.json5` gained the template's signature-default ignore regex and disabled `PublicVisibility`/`ProtectedVisibility`; the existing `addParts` ignore is kept. `Money::multiply()` and `WebhookCapability::__construct()` now list their parameters one per line (no behaviour change) so the ignore regex matches their defaults.
+- **Changed:** PHP 8.6 is supported: the `php` constraint is widened to
+  `8.3 - 8.6` (#12). CI runs PHP 8.6 as a regular matrix entry; the
+  backward-compatibility job runs on PHP 8.5.
+- **Fixed:** psalm 7.15.0 compatibility in `JsonResponseDecoder`: its stricter
+  `get_object_vars()` stub infers `array<array-key, mixed>`, which the decoder's
+  documented `array<string, mixed>` payload shape now asserts explicitly at both
+  decode sites (annotation-only, no runtime change).
 
 ## 0.2.0 — 2026-08-20
 
