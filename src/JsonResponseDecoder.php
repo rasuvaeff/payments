@@ -37,6 +37,7 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
             throw new MalformedResponseException('Payment response must be a JSON object');
         }
 
+        /** @var array<string, mixed> $decoded JSON object property names are strings. */
         $decoded = get_object_vars($decoded);
 
         if ($response->getStatusCode() >= self::HTTP_SUCCESS_MINIMUM && $response->getStatusCode() <= self::HTTP_SUCCESS_MAXIMUM) {
@@ -51,6 +52,7 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
      */
     private function exceptionFor(int $status, array $payload): PaymentException
     {
+        /** @var array<string, mixed> $error JSON object property names are strings. */
         $error = isset($payload['error']) && $payload['error'] instanceof \stdClass
             ? get_object_vars($payload['error'])
             : [];
