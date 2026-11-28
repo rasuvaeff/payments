@@ -94,8 +94,12 @@ final class WebhookClaimTokenTest
     public function acceptsExactlyUrlSafeValuesUpTo128Bytes(string $value): void
     {
         $valid = preg_match('/^[A-Za-z0-9_-]{1,128}\z/', $value) === 1;
-        Classify::cover($valid, 'valid', 20);
-        Classify::cover(!$valid, 'invalid', 20);
+        // Expected shares from the generator weights: valid about 74 %,
+        // invalid about 26 % (sd about 2.5 pp over 300 runs). The gates sit at
+        // half of that, so they fail only when a branch is really gone — at 20 %
+        // the invalid gate failed about once in a hundred runs (2026-11-28).
+        Classify::cover($valid, 'valid', 35);
+        Classify::cover(!$valid, 'invalid', 13);
 
         try {
             Assert::same((new WebhookClaimToken($value))->value, $value);
