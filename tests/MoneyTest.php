@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Rasuvaeff\Payments\Tests;
 
 use Rasuvaeff\Payments\Money;
+use Rasuvaeff\Payments\Tests\Support\MoneyGenerators;
+use Rasuvaeff\PropertyTesting\Classify;
 use Rasuvaeff\PropertyTesting\Property;
 use Testo\Assert;
 use Testo\Codecov\Covers;
@@ -257,5 +259,94 @@ final class MoneyTest
         Expect::exception(\OverflowException::class)->withMessage('Money multiplication overflow');
 
         (new Money(minorUnits: 4_294_967_295, currency: 'EUR'))->multiply(numerator: 4_294_967_297, denominator: 2);
+    }
+
+    #[Property(runs: 300, generators: [MoneyGenerators::class, 'threeEuros'])]
+    public function additionIsAssociative(Money $a, Money $b, Money $c): void
+    {
+        Assert::same($a->add($b)->add($c)->minorUnits, $a->add($b->add($c))->minorUnits);
+    }
+
+    /**
+     * Exactly one of less, equal and greater holds for two amounts of one
+     * currency; across currencies `equals()` is false and ordering refuses.
+     */
+    #[Property(runs: 300, generators: [MoneyGenerators::class, 'twoAmounts'])]
+    public function comparisonIsATotalOrderWithinOneCurrency(Money $a, Money $b): void
+    {
+        $sameCurrency = $a->currency === $b->currency;
+        Classify::cover($sameCurrency, 'same currency', 20);
+        Classify::cover(!$sameCurrency, 'other currency', 20);
+
+        if (!$sameCurrency) {
+            Assert::false($a->equals($b));
+
+            try {
+                $a->isGreaterThan($b);
+                Assert::fail('Amounts in different currencies were ordered');
+            } catch (\InvalidArgumentException) {
+            }
+
+            return;
+        }
+
+        $outcomes = [$a->isLessThan($b), $a->equals($b), $a->isGreaterThan($b)];
+
+        Assert::same(array_sum(array_map(intval(...), $outcomes)), 1);
+        Assert::same($a->equals($b), $a->minorUnits === $b->minorUnits);
+        Assert::same($a->isGreaterThan($b), $b->isLessThan($a));
+    }
+
+    /** @return iterable<string, array{Money, Money}> */
+    public static function comparisonIsATotalOrderWithinOneCurrencyExamples(): iterable
+    {
+        yield 'equal' => [new Money(minorUnits: 5, currency: 'EUR'), new Money(minorUnits: 5, currency: 'EUR')];
+        yield 'same units, other currency' => [new Money(minorUnits: 1_000, currency: 'JPY'), new Money(minorUnits: 1_000, currency: 'USD')];
+        yield 'zero against one' => [new Money(minorUnits: 0, currency: 'EUR'), new Money(minorUnits: 1, currency: 'EUR')];
+    }
+
+    #[Property(runs: 200, generators: [MoneyGenerators::class, 'twoAmounts'])]
+    public function arithmeticRefusesAnotherCurrency(Money $a, Money $b): void
+    {
+        $refused = 0;
+
+        foreach ([static fn(): Money => $a->add($b), static fn(): Money => $a->subtract($b)] as $operation) {
+            try {
+                $operation();
+            } catch (\InvalidArgumentException) {
+                ++$refused;
+            }
+        }
+
+        Classify::cover($a->currency !== $b->currency, 'other currency', 20);
+
+        if ($a->currency !== $b->currency) {
+            Assert::same($refused, 2);
+        } else {
+            Assert::same($refused, $a->minorUnits < $b->minorUnits ? 1 : 0);
+        }
+    }
+
+    /**
+     * @param int<0, 1000000> $amount
+     * @param int<1, 1000> $denominator
+     */
+    #[Property(runs: 300, auto: true)]
+    public function multiplyingByOneIsIdentity(int $amount, int $denominator): void
+    {
+        Assert::same((new Money(minorUnits: $amount, currency: 'EUR'))->multiply($denominator, $denominator)->minorUnits, $amount);
+    }
+
+    /**
+     * @param int<0, 1000000> $amount
+     * @param int<0, 999> $numerator
+     * @param int<1, 1000> $denominator
+     */
+    #[Property(runs: 300, auto: true)]
+    public function multiplyIsMonotoneInTheNumerator(int $amount, int $numerator, int $denominator): void
+    {
+        $money = new Money(minorUnits: $amount, currency: 'EUR');
+
+        Assert::true($money->multiply($numerator, $denominator)->minorUnits <= $money->multiply($numerator + 1, $denominator)->minorUnits);
     }
 }

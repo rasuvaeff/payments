@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Rasuvaeff\Payments\Tests;
 
 use Rasuvaeff\Payments\AuthContext;
+use Rasuvaeff\PropertyTesting\ArbitraryInterface;
+use Rasuvaeff\PropertyTesting\Gen;
+use Rasuvaeff\PropertyTesting\Property;
 use Testo\Assert;
 use Testo\Codecov\Covers;
 use Testo\Data\DataProvider;
@@ -129,5 +132,46 @@ final class AuthContextTest
         yield 'basic password' => ['basic', 'password'];
         yield 'header map' => ['fromHeaders', 'headers'];
         yield 'constructor header map' => ['__construct', 'headers'];
+    }
+
+    /**
+     * Whatever the credential, a dump shows none of it: neither the bearer
+     * token nor the Basic pair, encoded or not. Tokens are long enough not to
+     * occur in the class name by chance.
+     */
+    #[Property(runs: 200)]
+    public function aDumpNeverShowsTheCredential(string $secret, string $user): void
+    {
+        $bearer = AuthContext::bearer($secret);
+        $basic = AuthContext::basic($user, $secret);
+        $headers = AuthContext::fromHeaders(['X-Api-Key' => $secret]);
+
+        Assert::same($bearer->headers(), ['Authorization' => 'Bearer ' . $secret]);
+        Assert::same($headers->headers(), ['X-Api-Key' => $secret]);
+
+        foreach ([$bearer, $basic, $headers] as $context) {
+            foreach ([print_r($context, return: true), $this->varDump($context)] as $dump) {
+                Assert::false(str_contains($dump, $secret));
+                Assert::false(str_contains($dump, base64_encode($user . ':' . $secret)));
+            }
+
+        }
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    public static function aDumpNeverShowsTheCredentialGenerators(): array
+    {
+        return [
+            'secret' => Gen::stringMatching('sk_[A-Za-z0-9]{12,40}'),
+            'user' => Gen::stringMatching('[a-z]{1,12}'),
+        ];
+    }
+
+    private function varDump(AuthContext $context): string
+    {
+        ob_start();
+        var_dump($context);
+
+        return (string) ob_get_clean();
     }
 }

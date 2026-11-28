@@ -8,6 +8,10 @@ use Rasuvaeff\Payments\CaptureMethod;
 use Rasuvaeff\Payments\ConfirmationMethod;
 use Rasuvaeff\Payments\CreatePaymentRequest;
 use Rasuvaeff\Payments\PaymentMethodReference;
+use Rasuvaeff\PropertyTesting\ArbitraryInterface;
+use Rasuvaeff\PropertyTesting\Classify;
+use Rasuvaeff\PropertyTesting\Gen;
+use Rasuvaeff\PropertyTesting\Property;
 use Testo\Assert;
 use Testo\Codecov\Covers;
 use Testo\Data\DataProvider;
@@ -205,4 +209,44 @@ final class CreatePaymentRequestTest
         Assert::null($request->paymentMethod);
     }
 
+    /**
+     * A key is kept byte for byte when it is a header token of at most 255
+     * bytes and refused otherwise — never trimmed, normalised or replaced
+     * by a generated one.
+     */
+    #[Property(runs: 300)]
+    public function keepsAValidKeyVerbatimAndRefusesTheRest(string $key): void
+    {
+        $valid = $key !== '' && \strlen($key) <= 255 && preg_match('/[\x00-\x20\x7F]/', $key) === 0;
+        Classify::cover($valid, 'valid', 20);
+        Classify::cover(!$valid, 'refused', 15);
+
+        try {
+            $request = new CreatePaymentRequest(operationId: Fixtures::operation(), amount: Fixtures::money(), idempotencyKey: $key);
+            Assert::true($valid);
+            Assert::same($request->idempotencyKey, $key);
+        } catch (\InvalidArgumentException) {
+            Assert::false($valid);
+        }
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    public static function keepsAValidKeyVerbatimAndRefusesTheRestGenerators(): array
+    {
+        return ['key' => Gen::frequency([
+            [3, Gen::stringMatching('[A-Za-z0-9._~:-]{1,40}')],
+            [1, Gen::naughtyString()],
+            [1, Gen::stringFrom("k \t\x7F", 1, 10)],
+            [1, Gen::stringFrom('k', 250, 260)],
+        ])];
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function keepsAValidKeyVerbatimAndRefusesTheRestExamples(): iterable
+    {
+        yield 'maximum' => [str_repeat('k', 255)];
+        yield 'one over' => [str_repeat('k', 256)];
+        yield 'uuid' => ['550e8400-e29b-41d4-a716-446655440000'];
+        yield 'trailing newline' => ["key\n"];
+    }
 }

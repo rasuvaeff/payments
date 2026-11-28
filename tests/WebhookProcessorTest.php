@@ -17,6 +17,7 @@ use Rasuvaeff\Payments\QueuedWebhookEventAcceptance;
 use Rasuvaeff\Payments\RejectedWebhookEvent;
 use Rasuvaeff\Payments\ReplayedWebhookEvent;
 use Rasuvaeff\Payments\SynchronousWebhookEventAcceptance;
+use Rasuvaeff\Payments\Tests\Support\WebhookLifecycleMachine;
 use Rasuvaeff\Payments\UnknownWebhookEvent;
 use Rasuvaeff\Payments\UnsupportedWebhookEvent;
 use Rasuvaeff\Payments\UnsupportedWebhookEventException;
@@ -34,6 +35,11 @@ use Rasuvaeff\Payments\WebhookProcessor;
 use Rasuvaeff\Payments\WebhookReconcilerInterface;
 use Rasuvaeff\Payments\WebhookValidationFailed;
 use Rasuvaeff\Payments\WebhookValidatorInterface;
+use Rasuvaeff\PropertyTesting\ArbitraryInterface;
+use Rasuvaeff\PropertyTesting\Classify;
+use Rasuvaeff\PropertyTesting\Gen;
+use Rasuvaeff\PropertyTesting\Property;
+use Rasuvaeff\PropertyTesting\StateMachine\RuleSequence;
 use Rasuvaeff\Understudy\Arg;
 use Rasuvaeff\Understudy\Understudy;
 use Testo\Assert;
@@ -555,5 +561,34 @@ final class WebhookProcessorTest
             occurredAt: new \DateTimeImmutable('2026-08-03T12:00:00+00:00'),
             payload: ['amount' => 1_200],
         );
+    }
+
+    /**
+     * Any interleaving of deliveries — each answered by the adapter in one
+     * of the scripted modes — and of another worker holding and dropping a
+     * claim keeps the delivery guarantee: an event is queued at most once,
+     * a terminal verdict is final, a failure leaves the event redeliverable
+     * and a held claim is never finalised by the processor.
+     */
+    #[Property(runs: 200)]
+    public function claimLifecycleKeepsTheDeliveryGuarantee(RuleSequence $sequence): void
+    {
+        $machine = null;
+        $sequence->run(static function () use (&$machine): WebhookLifecycleMachine {
+            return $machine = new WebhookLifecycleMachine();
+        });
+        \assert($machine instanceof WebhookLifecycleMachine);
+
+        // About half of each share measured over repeated 200-run samples
+        // (2026-11-28): ok 22%, replayed 38-42%, released 32-42%, held 31%.
+        foreach (['ok' => 10, 'replayed' => 20, 'released' => 15, 'held elsewhere' => 15, 'invalid' => 18, 'unknown' => 10, 'unsupported' => 10, 'malformed' => 10] as $label => $minimum) {
+            Classify::cover(isset($machine->seen[$label]), $label, $minimum);
+        }
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    public static function claimLifecycleKeepsTheDeliveryGuaranteeGenerators(): array
+    {
+        return ['sequence' => Gen::rules(WebhookLifecycleMachine::class, minLength: 0, maxLength: 20)];
     }
 }
