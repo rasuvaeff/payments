@@ -297,10 +297,12 @@ creating a second one. The decoder reads no response headers, so a provider
 that sends its request id or `Retry-After` only as a header leaves those keys
 empty — read them from the response in the adapter.
 
-`IdempotencyConflictException` means the key was reused with a request that
-differs from the first: a caller bug. Retrying with the same key fails the same
-way and retrying with a new key repeats the operation, so neither is a retry
-policy. The refund row matches any provider code containing `refund`, which also
+`IdempotencyConflictException` usually means the key was reused with a request
+that differs from the first: a caller bug. Retrying with the same key fails the
+same way and retrying with a new key repeats the operation, so neither is a
+retry policy. One case is retryable: `providerCode` `idempotency_key_in_use`
+(Stripe answers 409) means a concurrent request with the same key is still
+running, and retrying later with the same key returns its result. The refund row matches any provider code containing `refund`, which also
 catches codes such as `charge_already_refunded`; an adapter that needs a finer
 split classifies by `providerCode` itself.
 
