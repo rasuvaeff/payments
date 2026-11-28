@@ -311,7 +311,7 @@ $payload = (new JsonResponseDecoder())->decode($response);
 | 404 | `NotFoundException` |
 | 429 | `RateLimitedException` |
 | 5xx | `ServerException` |
-| Тип `idempotency_error` | `IdempotencyConflictException` |
+| Тип `idempotency_error` / код `idempotency_key_in_use` | `IdempotencyConflictException` |
 | Тип `refund_error` / refund-код | `RefundFailedException` |
 | Тип `card_error` / `decline` | `ProviderDeclinedException` |
 | Прочие не-2xx | `PaymentException` |
@@ -323,7 +323,8 @@ JSON-объект (HTML или пустая страница балансиро�
 сбоя), всё равно бросает исключение своей строки по статусу — с сообщением
 `Payment provider request failed` и без провайдерских метаданных. Поэтому 5xx
 остаётся retryable `ServerException`, а `MalformedResponseException` значит
-только то, что не удалось прочитать успешный ответ.
+только то, что не удалось прочитать успешный ответ. Пустой или пробельный
+`error.message` получает то же фиксированное сообщение.
 
 `PaymentException` предоставляет санитизированные `providerCode`,
 `providerType`, `providerParameter` и скалярный `details` по allow-list:
@@ -341,7 +342,9 @@ request id или `Retry-After` только заголовком, эти клю
 политика ретраев. Один случай ретраибелен: `providerCode`
 `idempotency_key_in_use` (Stripe отвечает 409) значит, что параллельный запрос с
 тем же ключом ещё выполняется, и повтор позже с тем же ключом вернёт его
-результат. Строка про refund ловит любой провайдерский код, содержащий `refund`,
+результат. Stripe документирует этот код без типа ошибки, с которым он
+приходит, поэтому декодер классифицирует его по одному коду; строка статуса
+(429, 5xx) по-прежнему важнее. Строка про refund ловит любой провайдерский код, содержащий `refund`,
 включая коды вроде `charge_already_refunded`; адаптер, которому нужно точнее,
 классифицирует по `providerCode` сам.
 

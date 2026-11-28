@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Rasuvaeff\Payments;
 
 /**
- * The provider refused an idempotency key (Stripe `idempotency_error`).
+ * The provider refused an idempotency key: an error of type
+ * `idempotency_error`, or of code `idempotency_key_in_use` whatever its type
+ * (Stripe documents that code without naming its type).
  *
  * Usually the key was reused with a request that differs from the first one:
  * a fault of the caller. Retrying with the same key fails the same way, and

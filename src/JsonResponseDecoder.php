@@ -90,7 +90,14 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
         $code = $this->stringValue($error, 'code');
         $type = $this->stringValue($error, 'type');
         $parameter = $this->stringValue($error, 'param');
-        $message = $this->stringValue($error, 'message') ?? 'Payment provider request failed';
+        $message = $this->stringValue($error, 'message');
+
+        // A blank provider message is no message: an exception with empty
+        // text would reach the log saying nothing.
+        if ($message === null || trim($message) === '') {
+            $message = 'Payment provider request failed';
+        }
+
         /** @var array<string, scalar|null> $details */
         $details = [];
 
@@ -131,7 +138,9 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
             $exceptionClass = RateLimitedException::class;
         } elseif ($status >= self::HTTP_SERVER_ERROR_MINIMUM) {
             $exceptionClass = ServerException::class;
-        } elseif ($type === 'idempotency_error') {
+        } elseif ($type === 'idempotency_error' || $code === 'idempotency_key_in_use') {
+            // Stripe documents `idempotency_key_in_use` without naming the
+            // type it comes with, so the code classifies on its own.
             $exceptionClass = IdempotencyConflictException::class;
         } elseif ($type === 'refund_error' || str_contains($code ?? '', 'refund')) {
             $exceptionClass = RefundFailedException::class;

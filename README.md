@@ -306,7 +306,7 @@ handoff. `JsonResponseDecoder` maps HTTP and provider error payloads to typed
 | 404 | `NotFoundException` |
 | 429 | `RateLimitedException` |
 | 5xx | `ServerException` |
-| `idempotency_error` type | `IdempotencyConflictException` |
+| `idempotency_error` type / `idempotency_key_in_use` code | `IdempotencyConflictException` |
 | `refund_error` type / refund code | `RefundFailedException` |
 | `card_error` / `decline` type | `ProviderDeclinedException` |
 | Other non-2xx | `PaymentException` |
@@ -318,7 +318,8 @@ JSON object — the HTML or empty page a load balancer, CDN or WAF serves during
 an outage — still raises the exception of its status row, with the message
 `Payment provider request failed` and no provider metadata. So a 5xx stays a
 retryable `ServerException`; `MalformedResponseException` only means a
-successful answer could not be read.
+successful answer could not be read. An empty or blank `error.message` gets the
+same fixed message.
 
 `PaymentException` exposes sanitized `providerCode`, `providerType`,
 `providerParameter` and allow-listed scalar `details`: `request_id` and
@@ -335,7 +336,9 @@ that differs from the first: a caller bug. Retrying with the same key fails the
 same way and retrying with a new key repeats the operation, so neither is a
 retry policy. One case is retryable: `providerCode` `idempotency_key_in_use`
 (Stripe answers 409) means a concurrent request with the same key is still
-running, and retrying later with the same key returns its result. The refund row matches any provider code containing `refund`, which also
+running, and retrying later with the same key returns its result. Stripe
+documents that code without the error type it comes with, so the decoder
+classifies it by the code alone; a status row (429, 5xx) still wins. The refund row matches any provider code containing `refund`, which also
 catches codes such as `charge_already_refunded`; an adapter that needs a finer
 split classifies by `providerCode` itself.
 

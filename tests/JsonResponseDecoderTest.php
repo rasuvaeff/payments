@@ -191,6 +191,10 @@ final class JsonResponseDecoderTest
         yield 'idempotency conflict' => [400, '{"error":{"type":"idempotency_error","code":"idempotency_key_in_use"}}', IdempotencyConflictException::class];
         yield 'idempotency conflict 409' => [409, '{"error":{"type":"idempotency_error"}}', IdempotencyConflictException::class];
         yield 'idempotency type over refund code' => [400, '{"error":{"type":"idempotency_error","code":"refund_key"}}', IdempotencyConflictException::class];
+        // Stripe documents the code but not the type it comes with.
+        yield 'key in use under another type' => [409, '{"error":{"type":"invalid_request_error","code":"idempotency_key_in_use"}}', IdempotencyConflictException::class];
+        yield 'key in use without a type' => [400, '{"error":{"code":"idempotency_key_in_use"}}', IdempotencyConflictException::class];
+        yield 'status beats key in use' => [429, '{"error":{"code":"idempotency_key_in_use"}}', RateLimitedException::class];
         yield 'status beats idempotency type' => [503, '{"error":{"type":"idempotency_error"}}', ServerException::class];
         yield 'plain 409' => [409, '{}', PaymentException::class];
         yield 'generic 402' => [402, '{}', PaymentException::class];
@@ -318,6 +322,38 @@ final class JsonResponseDecoderTest
         }
 
         Assert::fail('Expected a payment exception');
+    }
+
+    /**
+     * An empty or blank provider message is no message: the exception keeps
+     * the fixed fallback instead of an empty text in the log.
+     */
+    #[DataProvider('blankMessageProvider')]
+    public function replacesABlankProviderMessage(string $message): void
+    {
+        try {
+            (new JsonResponseDecoder())->decode(new Response(
+                status: 400,
+                body: json_encode(['error' => ['message' => $message, 'code' => 'x']], JSON_THROW_ON_ERROR),
+            ));
+        } catch (PaymentException $exception) {
+            Assert::same($exception->getMessage(), 'Payment provider request failed');
+            Assert::same($exception->providerCode, 'x');
+
+            return;
+        }
+
+        Assert::fail('Expected a payment exception');
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function blankMessageProvider(): iterable
+    {
+        yield 'empty' => [''];
+        yield 'spaces' => ['   '];
+        yield 'whitespace' => ["\t\n "];
     }
 
     /**
