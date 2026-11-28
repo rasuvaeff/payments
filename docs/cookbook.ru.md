@@ -4,6 +4,11 @@
 пакеты из [README.ru.md](../README.ru.md); исполняемые скрипты лежат в
 [examples/](../examples/) и в пакетах-адаптерах.
 
+> Адаптеры Stripe и PayPal (`rasuvaeff/payments-stripe`,
+> `rasuvaeff/payments-paypal`) **ещё не опубликованы**: `composer require` их
+> сегодня не установит. Рецепты ниже показывают API, с которым они готовятся, и
+> до первого релиза оно может измениться.
+
 ## Содержание
 
 1. [Подключить Stripe-шлюз](#подключить-stripe-шлюз)
@@ -215,7 +220,7 @@ $outcome = match (true) {
 Фаза 1 (синхронная): проверка подписи → атомарный `claim()` провайдерского
 event id → распознавание и маппинг → надёжная постановка в очередь →
 `complete()` захвата. Фаза 2 (реконсиляция): повторный запрос авторитетного
-состояния провайдера, сверка суммы с заказом, персистенция проекции попытки,
+состояния провайдера, сверка захваченной суммы с заказом, персистенция проекции попытки,
 затем события приложения. Пейлоад вебхука — только наблюдение; авторитетное
 состояние всегда берётся из повторного запроса.
 
@@ -225,12 +230,26 @@ $attempt = $gateway->retrievePayment(new RetrievePaymentRequest(
     payment: $event->payment,
 ));
 
-// Сверять сумму И валюту. Один `minorUnits === $order->total` примет
-// 1000 JPY за заказ на 1000 USD.
-if ($attempt->state === PaymentState::Succeeded && $attempt->amount->equals($order->total)) {
+// Сверять собранное, а не авторизованное: после частичного capture
+// `amount` — по-прежнему вся авторизация. `capturedAmount` — брутто: более
+// поздний возврат его не уменьшает, возвраты сверяются отдельно.
+$collected = $attempt->capturedAmount;
+
+if ($collected === null) {
+    // Адаптер не смог прочитать захваченную сумму. Никогда не помечать заказ
+    // оплаченным наугад: повторить запрос позже или отправить на ручную проверку.
+    $review->flag(order: $order, attempt: $attempt);
+} elseif ($attempt->state === PaymentState::Succeeded && $collected->equals($order->total)) {
+    // Сверять сумму И валюту: один `minorUnits === $order->total` примет
+    // 1000 JPY за заказ на 1000 USD.
     $order->markPaid();
 }
 ```
+
+Частичный capture (700 из 1200) оставляет платёж `Succeeded` с `amount` 1200 и
+`capturedAmount` 700, поэтому заказ остаётся неоплаченным. Исполняемая версия
+этого рецепта на фейках — `examples/reconcile-partial-capture.php` в
+`rasuvaeff/payments-testing`.
 
 ## Реализация хранилища событий
 
@@ -314,7 +333,7 @@ final class DbWebhookEventStore implements WebhookEventStoreInterface
 | Понятие | Область | Время жизни |
 |---|---|---|
 | `OperationId` | одна логическая бизнес-команда | неизменен сквозь ретраи, провайдеров и failover |
-| `idempotencyKey` | один вызов провайдера | неизменен сквозь транспортные ретраи этого вызова; новое значение при новой попытке по политике |
+| `idempotencyKey` | один вызов провайдера | неизменен сквозь транспортные ретраи этого вызова; новое значение при новой попытке по политике. Для create без ключа генерируется (UUID v4) — читайте его из запроса, если нужно сохранить |
 
 Адаптер пробрасывает оба; хранение и защита от replay — на стороне вашего
 приложения (или будущего Yii3-бриджа).
@@ -327,8 +346,11 @@ use Rasuvaeff\PaymentsTesting\FakeGatewayConfig;
 use Rasuvaeff\PaymentsTesting\FakePaymentGateway;
 use Rasuvaeff\PaymentsTesting\PaymentGatewayAssertions;
 
-// Детерминированный исход задаётся FakeGatewayConfig::createState
-$succeeding = new FakePaymentGateway();   // конфиг по умолчанию: PaymentState::Succeeded
+// Без закреплённого createState начальное состояние следует из запроса, как
+// отвечает провайдер: RequiresPaymentMethod без paymentMethod, Pending при
+// ручном подтверждении, RequiresCapture при ручном capture, иначе Succeeded.
+// FakeGatewayConfig::createState закрепляет один исход для каждого create.
+$succeeding = new FakePaymentGateway();   // в $request есть paymentMethod: Succeeded
 $failing = new FakePaymentGateway(new FakeGatewayConfig(createState: PaymentState::Failed));
 
 $attempt = $succeeding->createPayment($request);
@@ -350,7 +372,10 @@ PaymentGatewayAssertions::assertCreatePaymentIdempotency(gateway: $succeeding, r
 пакетом `rasuvaeff/retry` и ретраьте только явно идемпотентные операции:
 
 - чтения (`retrievePayment`, `retrieveRefund`);
-- создания со стабильным idempotency key;
+- создания, если повторно отправляется тот же объект `CreatePaymentRequest`
+  (или его сохранённый `idempotencyKey`) — ключ есть у каждого create и
+  генерируется, если вы его не передали, но запрос, пересобранный внутри
+  цикла ретраев, получает новый;
 - никогда «слепые» POST без ключа.
 
 Транспортные сбои маппятся в `TransportException`/`ServerException`, и решение

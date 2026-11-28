@@ -35,7 +35,7 @@ final class WebhookProcessingResultTest
 {
     public function processedResultKeepsEventAndPolicy(): void
     {
-        $event = self::event();
+        $event = $this->event();
         $result = new ProcessedWebhook(
             event: $event,
             acknowledgementPolicy: WebhookAcknowledgementPolicy::AfterValidation,
@@ -218,7 +218,7 @@ final class WebhookProcessingResultTest
         );
     }
 
-    private static function event(): ObservedPaymentEvent
+    private function event(): ObservedPaymentEvent
     {
         return new ObservedPaymentEvent(
             providerEventId: 'evt_1',

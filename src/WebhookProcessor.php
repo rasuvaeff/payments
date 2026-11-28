@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Rasuvaeff\Payments;
 
+use Rasuvaeff\Payments\Internal\Utf8Text;
 use Rasuvaeff\Payments\Internal\WebhookLimits;
 
 /**
@@ -120,12 +121,12 @@ final readonly class WebhookProcessor implements WebhookProcessorInterface
             return new UnsupportedWebhookEvent(
                 providerEventId: $providerEventId,
                 type: $eventType,
-                reason: $exception->getMessage() !== '' ? $exception->getMessage() : 'Webhook event is unsupported',
+                reason: $this->reason(message: $exception->getMessage(), fallback: 'Webhook event is unsupported'),
             );
         } catch (MalformedResponseException $exception) {
             return new RejectedWebhookEvent(
                 providerEventId: $providerEventId,
-                reason: $exception->getMessage() !== '' ? $exception->getMessage() : 'Webhook payload cannot be mapped',
+                reason: $this->reason(message: $exception->getMessage(), fallback: 'Webhook payload cannot be mapped'),
                 type: $eventType,
             );
         }
@@ -137,6 +138,20 @@ final readonly class WebhookProcessor implements WebhookProcessorInterface
             event: $event,
             acknowledgementPolicy: $this->eventAcceptance->policy(),
         );
+    }
+
+    /**
+     * The message is the mapper's, and a mapper may echo payload text into
+     * it. The outcome constructors refuse a blank reason and one over the
+     * byte cap; letting either through would turn a terminal verdict into an
+     * exception — the claim released, the delivery answered 503 and the same
+     * payload redelivered forever.
+     */
+    private function reason(string $message, string $fallback): string
+    {
+        $reason = Utf8Text::truncate(value: $message, maximumBytes: WebhookLimits::REASON);
+
+        return trim($reason) !== '' ? $reason : $fallback;
     }
 
     /**

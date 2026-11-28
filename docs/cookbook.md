@@ -4,6 +4,11 @@ Practical recipes for the `rasuvaeff/payments` stack. All examples assume the
 packages from [README.md](../README.md); runnable scripts live in
 [examples/](../examples/) and in the adapter packages.
 
+> The Stripe and PayPal adapters (`rasuvaeff/payments-stripe`,
+> `rasuvaeff/payments-paypal`) are **not published yet**: `composer require`
+> cannot install them today. Their recipes below show the API they are being
+> built with and may change before the first release.
+
 ## Table of contents
 
 1. [Wire a Stripe gateway](#wire-a-stripe-gateway)
@@ -213,7 +218,7 @@ than `validation_failed` so it is diagnosable, but the fix is the mount order.
 Phase 1 (synchronous): verify signature → atomically `claim()` the provider
 event id → recognize and map the event → durably enqueue → `complete()` the
 claim. Phase 2 (reconciliation): re-fetch the authoritative provider state,
-compare the amount with the order, persist the attempt projection, then emit
+compare the captured amount with the order, persist the attempt projection, then emit
 application events. The webhook payload is only an observation; authoritative
 state always comes from the re-fetch.
 
@@ -223,12 +228,26 @@ $attempt = $gateway->retrievePayment(new RetrievePaymentRequest(
     payment: $event->payment,
 ));
 
-// Compare amount AND currency. `minorUnits === $order->total` alone accepts
-// 1000 JPY for a 1000 USD order.
-if ($attempt->state === PaymentState::Succeeded && $attempt->amount->equals($order->total)) {
+// Reconcile what was collected, not what was authorized: after a partial
+// capture `amount` is still the whole authorization. `capturedAmount` is
+// gross — a later refund does not reduce it; refunds reconcile separately.
+$collected = $attempt->capturedAmount;
+
+if ($collected === null) {
+    // The adapter could not read what was captured. Never mark an order paid
+    // on a guess: re-fetch later or route it to manual review.
+    $review->flag(order: $order, attempt: $attempt);
+} elseif ($attempt->state === PaymentState::Succeeded && $collected->equals($order->total)) {
+    // Compare amount AND currency: `minorUnits === $order->total` alone
+    // accepts 1000 JPY for a 1000 USD order.
     $order->markPaid();
 }
 ```
+
+A partial capture (700 of 1200) leaves the payment `Succeeded` with `amount`
+1200 and `capturedAmount` 700, so the order stays unpaid. A runnable version of
+this recipe against the fakes is
+`rasuvaeff/payments-testing`'s `examples/reconcile-partial-capture.php`.
 
 ## Implement the event store
 
@@ -314,7 +333,7 @@ disagree about the format.
 | Concept | Scope | Lifetime |
 |---|---|---|
 | `OperationId` | one logical business command | stable across retries, providers and failover attempts |
-| `idempotencyKey` | one provider-side call attempt | stable across transport retries of that exact call; new value when policy starts a new attempt |
+| `idempotencyKey` | one provider-side call attempt | stable across transport retries of that exact call; new value when policy starts a new attempt. Generated (UUID v4) for a create without one, so read it from the request when you need to persist it |
 
 The adapter forwards both; persistence and replay enforcement live in your
 application (or the future Yii3 bridge).
@@ -327,8 +346,11 @@ use Rasuvaeff\PaymentsTesting\FakeGatewayConfig;
 use Rasuvaeff\PaymentsTesting\FakePaymentGateway;
 use Rasuvaeff\PaymentsTesting\PaymentGatewayAssertions;
 
-// Deterministic outcome is chosen by FakeGatewayConfig::createState
-$succeeding = new FakePaymentGateway();   // default config: PaymentState::Succeeded
+// Without a pinned createState the created state follows the request, as a
+// provider answers it: RequiresPaymentMethod without a paymentMethod, Pending
+// for manual confirmation, RequiresCapture for manual capture, Succeeded
+// otherwise. FakeGatewayConfig::createState pins one outcome for every create.
+$succeeding = new FakePaymentGateway();   // $request carries a paymentMethod: Succeeded
 $failing = new FakePaymentGateway(new FakeGatewayConfig(createState: PaymentState::Failed));
 
 $attempt = $succeeding->createPayment($request);
@@ -350,7 +372,9 @@ Core ships no retry policy on purpose. Decorate the transport (or the gateway)
 with `rasuvaeff/retry` and retry only explicitly idempotent operations:
 
 - retrievals (`retrievePayment`, `retrieveRefund`);
-- creates carrying a stable idempotency key;
+- creates, when the same `CreatePaymentRequest` object (or its remembered
+  `idempotencyKey`) is resent — every create carries a key, generated when
+  you pass none, but a request rebuilt inside the retry loop gets a new one;
 - never blind `POST`s without a key.
 
 Map transport failures to `TransportException`/`ServerException` and let the

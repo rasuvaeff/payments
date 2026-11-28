@@ -17,6 +17,38 @@ customer picks a method client-side. Mount the webhook route before any
 body-parsing middleware — a consumed stream reads back empty and fails every
 signature check (reported as the `empty_body` outcome).
 
+Adapter contract: `Money::$minorUnits` is the ISO 4217 minor unit (USD cents,
+JPY/ISK whole units, KWD fils); an adapter converts to its provider's wire
+format and refuses, before any HTTP call, an amount it cannot represent
+(Stripe ISK/UGX are two-decimal on the wire → ×100; Stripe MGA is
+zero-decimal → must be divisible by 100, ÷100 out, ×100 back; Stripe
+BHD/JOD/KWD/OMR/TND need a last digit 0; PayPal HUF/TWD are zero-decimal →
+must be divisible by 100). A zero amount is accepted by the core; the provider refuses it.
+`PaymentAttempt::$amount` is the created/authorized amount and a capture does
+not change it; `PaymentAttempt::$capturedAmount` (`?Money`, last constructor
+argument) is the GROSS amount captured so far — `null` not reported, zero
+before a capture or while a capture is pending, less than `amount` after a
+partial capture, may exceed it on overcapture; refunds never reduce it; same
+currency as `amount` or `\InvalidArgumentException`. Reconcile collected money
+against `capturedAmount` (`null` → do not mark paid; re-fetch or review).
+Adapters map Stripe `amount_received`, PayPal the sum of `COMPLETED`,
+`PARTIALLY_REFUNDED` and `REFUNDED` captures at their captured amount
+(`PENDING`/`DECLINED`/`DENIED`/`FAILED` → zero; an order not captured yet →
+zero; a `COMPLETED` order whose response carries no capture, or an
+undocumented capture status → `null`). `CreatePaymentRequest::$idempotencyKey` is always a non-empty string: a
+given key is kept verbatim, otherwise the request mints a UUID v4 (36 chars)
+— build the request once outside the retry loop and resend the same object
+(or persist the key); adapters always receive it. Capture/confirm/cancel/refund
+keys stay optional and are never generated: without one a request is not
+retry-safe. The core caps keys at 255 bytes; an
+adapter with a lower provider cap (PayPal `PayPal-Request-Id` ≤ 108) rejects a
+longer key with `\InvalidArgumentException` before the HTTP call. A mapper
+rethrows value-object `\InvalidArgumentException` as
+`MalformedResponseException` (only that and `UnsupportedWebhookEventException`
+are terminal in `WebhookProcessor`); extractor/recognizer return `null` for an
+unreadable body instead of throwing. `RefundState` has no transition map — a
+Stripe refund can go `succeeded` → `failed`.
+
 Contracts API:
 
 ```php
@@ -36,7 +68,7 @@ $method = new PaymentMethodReference(id: 'pm_1', kind: 'card');
 ```
 
 - Enums: `PaymentState` (Pending, RequiresPaymentMethod, RequiresAction, RequiresCapture, Processing, Succeeded, Failed, Canceled; `canTransitionTo(self): bool` advisory, terminal states return false). `Succeeded`/`Failed`/`Canceled` are terminal, so a recoverable provider status must never map to them — Stripe's `requires_payment_method` maps to `RequiresPaymentMethod` because the same intent can still reach `succeeded`, `RefundState` (Pending, Succeeded, Failed, Canceled), `CaptureMethod`/`ConfirmationMethod` (Automatic, Manual).
-- `PaymentAttempt(operationId, provider, payment, amount, state, rawStatus, createdAt, updatedAt, requestInfo, ?failure, ?nextAction)`: one provider execution; reference provider must match, `updatedAt >= createdAt`.
+- `PaymentAttempt(operationId, provider, payment, amount, state, rawStatus, createdAt, updatedAt, requestInfo, ?failure, ?nextAction, ?capturedAmount)`: one provider execution; reference provider must match, `updatedAt >= createdAt`, `capturedAmount` currency must equal `amount` currency.
 - `RefundAttempt(operationId, provider, refund, payment, requestedAmount, ?actualAmount, state, rawStatus, createdAt, updatedAt, requestInfo, ?failure)`.
 - `PaymentIntent(id, amount, createdAt, attempts)`: application aggregate; attempt currencies must match intent currency.
 - `PaymentFailure(code, ?message, retryable = false, details = [])`: sanitized, scalar details only.
@@ -59,7 +91,7 @@ interface PaymentGatewayInterface {
 //                        ::retrieveRefund(RetrieveRefundRequest): RefundAttempt
 ```
 
-- Requests: `CreatePaymentRequest(operationId, amount, paymentMethod, ?customer, captureMethod, confirmationMethod, ?description, metadata, ?idempotencyKey)`, `CapturePaymentRequest(operationId, payment, ?amount, ?idempotencyKey)`, `CreateRefundRequest(operationId, payment, ?amount, ?reason, ?idempotencyKey)`, `PaymentOperationRequest(operationId, payment, ?idempotencyKey)` for confirm/cancel, `RetrievePaymentRequest(operationId, payment)`, `RetrieveRefundRequest(operationId, refund)`.
+- Requests: `CreatePaymentRequest(operationId, amount, ?paymentMethod, ?customer, ?captureMethod = Automatic, ?confirmationMethod = Automatic, ?description, metadata, ?idempotencyKey = generated UUID v4)` (properties `captureMethod`, `confirmationMethod`, `idempotencyKey` are never null), `CapturePaymentRequest(operationId, payment, ?amount, ?idempotencyKey)`, `CreateRefundRequest(operationId, payment, ?amount, ?reason, ?idempotencyKey)`, `PaymentOperationRequest(operationId, payment, ?idempotencyKey)` for confirm/cancel, `RetrievePaymentRequest(operationId, payment)`, `RetrieveRefundRequest(operationId, refund)`.
 - Capabilities: `CapabilitySet::of(Capability ...)` (duplicate types rejected), `->get(Class::class): ?T`, `->has(Class::class): bool`, `->all(): list<Capability>`. Shipped: `PartialRefundCapability(?maximumRefunds)`, `SandboxCapability(environment = 'sandbox')`, `ThreeDsCapability(versions)`, `WebhookCapability(signatureRequired = true)`. Implement the `Capability` marker for custom ones.
 
 Registry and router:
@@ -92,18 +124,19 @@ $request = (new JsonRequestBuilder($requestFactory, $streamFactory))
 $payload = (new JsonResponseDecoder())->decode((new Psr18Transport($client))->send($request));
 ```
 
-- `AuthContext::bearer($token)` / `::basic($user, $pass)` / `::fromHeaders($map)` — in-memory only.
+- `AuthContext::bearer($token)` / `::basic($user, $pass)` / `::fromHeaders($map)` — in-memory only: `serialize()` throws `\LogicException`, `var_dump()`/`print_r()`/Symfony VarDumper redact values (`__debugInfo()` returns the private property under its mangled name, which VarDumper overlays on its `(array)` cast), credential parameters are `#[\SensitiveParameter]`; `var_export()`/`(array)` are not covered. `basic()` rejects `:` in the username (RFC 7617).
 - `FormRequestBuilder` encodes scalar-only form bodies.
-- `JsonResponseDecoder` maps: 401 `UnauthorizedException`, 403 `ForbiddenException`, 404 `NotFoundException`, 429 `RateLimitedException`, 5xx `ServerException`, refund errors `RefundFailedException`, card/decline `ProviderDeclinedException`, other non-2xx `PaymentException`, non-object JSON `MalformedResponseException`. PSR-18 failures become `TransportException`. `PaymentException` carries `providerCode`, `providerType`, `providerParameter`, scalar `details`.
+- `JsonRequestBuilder::build()` / `FormRequestBuilder::build()`: `GET`, `HEAD`, `DELETE` (case-sensitive) with `[]` data → no body, no `Content-Type` (also none from the `AuthContext`); `POST`/`PUT`/`PATCH` with `[]` → `{}` / empty form body with the media type; non-empty data is always sent as a body.
+- `JsonResponseDecoder` maps: 401 `UnauthorizedException`, 403 `ForbiddenException`, 404 `NotFoundException`, 429 `RateLimitedException`, 5xx `ServerException`, `idempotency_error` type or `idempotency_key_in_use` code (whatever the type) `IdempotencyConflictException` (key reused with a different request — caller bug, not retryable; except the provider's in-flight code — `providerCode` `idempotency_key_in_use` here (Stripe), `PREVIOUS_REQUEST_IN_PROGRESS` from `rasuvaeff/payments-paypal` — a concurrent request with the same key still running: retry later with the same key), refund errors `RefundFailedException` (type `refund_error` or any code containing `refund`), card/decline `ProviderDeclinedException`, other non-2xx `PaymentException`; a 2xx body that is not a JSON object `MalformedResponseException`. The status is classified before the body is read: an error answer with an HTML/empty/non-object body (LB, CDN, WAF outage pages) still raises its status exception, message `Payment provider request failed`, no provider metadata (a blank `error.message` gets the same message) — a 5xx stays a retryable `ServerException`. PSR-18 failures become `TransportException`. `PaymentException` carries `providerCode`, `providerType`, `providerParameter`, scalar `details` (`request_id`, `retry_after` from the body top level; `decline_code`, `payment_intent` = id of `error.payment_intent`). No response headers are read. A body stream already read by middleware is rewound first.
 
 Webhook API:
 
 - `RawJsonRequestBuilderInterface::buildRawJson(method, uri, body, auth)`: implemented by `JsonRequestBuilder`; sends an already-encoded JSON body byte for byte (throws on an empty body). Required when forwarding a document signed elsewhere — a decode/re-encode round trip escapes non-ASCII, turns `{}` into `[]` and drops a trailing zero, so the forwarded document stops being the received one.
-- `WebhookInput`: exact `rawBody`, provider, normalized headers and request metadata; use only sanitized accessors for audit data. `header()` requires a non-empty name.
+- `WebhookInput`: exact `rawBody`, provider, normalized headers and request metadata; use only sanitized accessors for audit data. `header()` requires a non-empty name. Header names must be RFC 9110 tokens (`tchar`: letters, digits, ``!#$%&'*+-.^_`|~``); an int array key (all-digit name) is accepted as its string and stays an int key in `headers()`/`sanitizedHeaders()` (cast with `(string)`); anything else throws `\InvalidArgumentException` (→ 503 from the controller).
 - `WebhookValidatorInterface::validate()`: native union return type `ValidWebhook|InvalidWebhook`. PHP rejects a widened signature and any other returned class, so the two outcomes are the whole contract.
 - `WebhookEventTypeExtractorInterface`: extracts the provider's raw event name after validation.
 - `WebhookEventRecognizerInterface`: maps a raw name to provider-neutral `ProviderEventType` or returns `null`.
-- `WebhookPayloadMapperInterface`: produces sanitized `ObservedPaymentEvent`; throw `UnsupportedWebhookEventException` for a known unsupported payload, `MalformedResponseException` for a payload that can never be mapped. Both are terminal — the claim is completed, not released — because redelivery yields the same verdict and a retry storm gets the endpoint disabled.
+- `WebhookPayloadMapperInterface`: produces sanitized `ObservedPaymentEvent`; throw `UnsupportedWebhookEventException` for a known unsupported payload, `MalformedResponseException` for a payload that can never be mapped. Both are terminal — the claim is completed, not released — because redelivery yields the same verdict and a retry storm gets the endpoint disabled. The outcome `reason` is the exception message capped at 1024 bytes (cut back to a UTF-8 boundary); a blank message gets a fixed fallback, so the message can never make the outcome throw.
 - `ObservedPaymentEvent(providerEventId, type, payment, state, rawStatus, occurredAt, ?refund, payload)`: scalar allow-listed payload; refund reference required for `RefundState` and forbidden for `PaymentState`; all references must share one provider.
 - `WebhookEventStoreInterface`: atomic `claim(provider, eventId)` returning `?WebhookClaimToken` (null = replayed), `complete(provider, eventId, token)` when the event is durably accepted, `release(provider, eventId, token)` for retryable failures. `complete()` is what makes stale-claim recovery safe: a claim that was never completed and whose lease expired must be reclaimable, a completed one never. Without it a crash between claim and acceptance is answered with a replay outcome (204) forever and the event is lost silently. The token is the fence: both finalisers compare it against the stored claim and are no-ops on a mismatch, so a worker whose lease was taken over cannot complete the new owner's attempt or delete its live claim. Alternative for a same-database queue: commit the claim row and the queue row in one transaction.
 - `WebhookClaimToken`: opaque fencing token; `::generate()` gives 128 bits of entropy, `equals()` compares values in constant time, value is a non-empty URL-safe string of at most 128 bytes.

@@ -24,7 +24,7 @@ One credential class is deliberately different: the Stripe PaymentIntent
 `client_secret`. Stripe designed it for the customer's browser —
 `stripe.js`/Elements needs it to confirm the payment — so exposing it to the
 frontend *for that one intent* is the intended flow, and the
-`rasuvaeff/payments-stripe` adapter surfaces it only through the
+`rasuvaeff/payments-stripe` adapter (not published yet) surfaces it only through the
 `ConfirmOnClient` next action while the payment still needs the customer.
 Everywhere else it is treated like any credential: no logs, no persistence
 beyond the checkout session, no webhook payloads or observations.

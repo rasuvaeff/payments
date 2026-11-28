@@ -6,6 +6,8 @@ namespace Rasuvaeff\Payments\Tests;
 
 use Nyholm\Psr7\Response;
 use Rasuvaeff\Payments\ForbiddenException;
+use Rasuvaeff\Payments\IdempotencyConflictException;
+use Rasuvaeff\Payments\Internal\Utf8Text;
 use Rasuvaeff\Payments\JsonResponseDecoder;
 use Rasuvaeff\Payments\MalformedResponseException;
 use Rasuvaeff\Payments\NotFoundException;
@@ -15,6 +17,10 @@ use Rasuvaeff\Payments\RateLimitedException;
 use Rasuvaeff\Payments\RefundFailedException;
 use Rasuvaeff\Payments\ServerException;
 use Rasuvaeff\Payments\UnauthorizedException;
+use Rasuvaeff\PropertyTesting\ArbitraryInterface;
+use Rasuvaeff\PropertyTesting\Classify;
+use Rasuvaeff\PropertyTesting\Gen;
+use Rasuvaeff\PropertyTesting\Property;
 use Testo\Assert;
 use Testo\Codecov\Covers;
 use Testo\Data\DataProvider;
@@ -23,6 +29,7 @@ use Testo\Test;
 
 #[Test]
 #[Covers(JsonResponseDecoder::class)]
+#[Covers(Utf8Text::class)]
 final class JsonResponseDecoderTest
 {
     public function decodesSuccessfulObject(): void
@@ -55,6 +62,71 @@ final class JsonResponseDecoderTest
         }
 
         Assert::fail('Expected PaymentException');
+    }
+
+    /**
+     * A card declined during a confirming create leaves a payment behind at
+     * the provider. Without its id the caller can only retry with a new key,
+     * which creates a second payment.
+     */
+    public function keepsDeclineCodeAndPaymentIdOfADecline(): void
+    {
+        try {
+            (new JsonResponseDecoder())->decode(new Response(
+                status: 402,
+                body: '{"error":{"type":"card_error","code":"card_declined","decline_code":"insufficient_funds","payment_intent":{"id":"pi_1","status":"requires_payment_method","client_secret":"pi_1_secret_x"}}}',
+            ));
+        } catch (ProviderDeclinedException $exception) {
+            Assert::same($exception->details, ['decline_code' => 'insufficient_funds', 'payment_intent' => 'pi_1']);
+
+            return;
+        }
+
+        Assert::fail('Expected ProviderDeclinedException');
+    }
+
+    public function discardsANonStringDeclineCodeAndAPaymentWithoutAStringId(): void
+    {
+        try {
+            (new JsonResponseDecoder())->decode(new Response(
+                status: 402,
+                body: '{"error":{"type":"card_error","decline_code":7,"payment_intent":{"id":5}}}',
+            ));
+        } catch (ProviderDeclinedException $exception) {
+            Assert::same($exception->details, []);
+
+            return;
+        }
+
+        Assert::fail('Expected ProviderDeclinedException');
+    }
+
+    public function discardsAPaymentIntentThatIsNotAnObject(): void
+    {
+        try {
+            (new JsonResponseDecoder())->decode(new Response(
+                status: 402,
+                body: '{"error":{"type":"card_error","payment_intent":"pi_1"}}',
+            ));
+        } catch (ProviderDeclinedException $exception) {
+            Assert::same($exception->details, []);
+
+            return;
+        }
+
+        Assert::fail('Expected ProviderDeclinedException');
+    }
+
+    /**
+     * A logging middleware that read the body leaves the stream at its end;
+     * the decoder must still see the whole document.
+     */
+    public function readsAnAlreadyConsumedBodyFromTheStart(): void
+    {
+        $response = new Response(status: 200, body: '{"id":"pay_1"}');
+        $response->getBody()->getContents();
+
+        Assert::same((new JsonResponseDecoder())->decode($response), ['id' => 'pay_1']);
     }
 
     public function discardsNonScalarDiagnosticsAndMalformedErrorShape(): void
@@ -116,8 +188,74 @@ final class JsonResponseDecoderTest
         yield 'explicit decline type' => [400, '{"error":{"type":"decline"}}', ProviderDeclinedException::class];
         yield 'refund' => [400, '{"error":{"type":"refund_error"}}', RefundFailedException::class];
         yield 'refund code' => [400, '{"error":{"code":"refund_failed"}}', RefundFailedException::class];
+        yield 'idempotency conflict' => [400, '{"error":{"type":"idempotency_error","code":"idempotency_key_in_use"}}', IdempotencyConflictException::class];
+        yield 'idempotency conflict 409' => [409, '{"error":{"type":"idempotency_error"}}', IdempotencyConflictException::class];
+        yield 'idempotency type over refund code' => [400, '{"error":{"type":"idempotency_error","code":"refund_key"}}', IdempotencyConflictException::class];
+        // Stripe documents the code but not the type it comes with.
+        yield 'key in use under another type' => [409, '{"error":{"type":"invalid_request_error","code":"idempotency_key_in_use"}}', IdempotencyConflictException::class];
+        yield 'key in use without a type' => [400, '{"error":{"code":"idempotency_key_in_use"}}', IdempotencyConflictException::class];
+        yield 'status beats key in use' => [429, '{"error":{"code":"idempotency_key_in_use"}}', RateLimitedException::class];
+        yield 'status beats idempotency type' => [503, '{"error":{"type":"idempotency_error"}}', ServerException::class];
+        yield 'plain 409' => [409, '{}', PaymentException::class];
         yield 'generic 402' => [402, '{}', PaymentException::class];
         yield 'generic client error' => [400, '{"error":{"type":"other"}}', PaymentException::class];
+    }
+
+    /**
+     * The status decides before the body is read. A load balancer, CDN or
+     * WAF answers an outage with an HTML or empty body; reading that as a
+     * malformed provider payload would turn a retryable 5xx/429 into an error
+     * the application treats as permanent — and on a 5xx the outcome of the
+     * charge is unknown, so giving up and charging again with a new key is a
+     * double charge.
+     */
+    #[DataProvider('unparseableErrorBodyProvider')]
+    public function classifiesAnUnparseableErrorBodyByStatus(int $status, string $body, string $expected): void
+    {
+        try {
+            (new JsonResponseDecoder())->decode(new Response(status: $status, body: $body));
+        } catch (PaymentException $exception) {
+            Assert::same($exception::class, $expected);
+            Assert::same($exception->getMessage(), 'Payment provider request failed');
+            Assert::null($exception->providerCode);
+            Assert::same($exception->details, []);
+
+            return;
+        }
+
+        Assert::fail('Expected a payment exception');
+    }
+
+    /**
+     * @return iterable<string, array{int, string, class-string<PaymentException>}>
+     */
+    public static function unparseableErrorBodyProvider(): iterable
+    {
+        $statuses = [
+            401 => UnauthorizedException::class,
+            403 => ForbiddenException::class,
+            404 => NotFoundException::class,
+            429 => RateLimitedException::class,
+            500 => ServerException::class,
+            502 => ServerException::class,
+            503 => ServerException::class,
+            400 => PaymentException::class,
+            402 => PaymentException::class,
+            300 => PaymentException::class,
+            199 => PaymentException::class,
+        ];
+        $bodies = [
+            'empty' => '',
+            'HTML' => '<html><body>503 Service Unavailable</body></html>',
+            'JSON list' => '[]',
+            'JSON scalar' => 'true',
+        ];
+
+        foreach ($statuses as $status => $class) {
+            foreach ($bodies as $name => $body) {
+                yield $status . ', ' . $name . ' body' => [$status, $body, $class];
+            }
+        }
     }
 
     #[DataProvider('malformedProvider')]
@@ -187,6 +325,38 @@ final class JsonResponseDecoderTest
     }
 
     /**
+     * An empty or blank provider message is no message: the exception keeps
+     * the fixed fallback instead of an empty text in the log.
+     */
+    #[DataProvider('blankMessageProvider')]
+    public function replacesABlankProviderMessage(string $message): void
+    {
+        try {
+            (new JsonResponseDecoder())->decode(new Response(
+                status: 400,
+                body: json_encode(['error' => ['message' => $message, 'code' => 'x']], JSON_THROW_ON_ERROR),
+            ));
+        } catch (PaymentException $exception) {
+            Assert::same($exception->getMessage(), 'Payment provider request failed');
+            Assert::same($exception->providerCode, 'x');
+
+            return;
+        }
+
+        Assert::fail('Expected a payment exception');
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function blankMessageProvider(): iterable
+    {
+        yield 'empty' => [''];
+        yield 'spaces' => ['   '];
+        yield 'whitespace' => ["\t\n "];
+    }
+
+    /**
      * The 1024th byte falls inside a two-byte sequence here, so the cut walks
      * back one byte. Leaving the split sequence in place would produce a
      * string `json_encode()` refuses — the log record carrying the error would
@@ -228,4 +398,137 @@ final class JsonResponseDecoderTest
         Assert::fail('Expected a payment exception');
     }
 
+    /**
+     * Whatever the bytes, the cap holds, the result stays valid UTF-8 and it
+     * is a prefix of the input — invalid input included.
+     */
+    #[Property(runs: 300)]
+    public function truncateReturnsAValidPrefixWithinTheCap(string $value, int $maximumBytes): void
+    {
+        $truncated = Utf8Text::truncate(value: $value, maximumBytes: $maximumBytes);
+
+        Classify::cover(strlen($value) > $maximumBytes, 'cut', 20);
+        Classify::when(preg_match('//u', $value) !== 1, 'invalid input');
+
+        Assert::true(strlen($truncated) <= $maximumBytes);
+        Assert::same(preg_match('//u', $truncated), 1);
+        Assert::true(str_starts_with($value, $truncated));
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    public static function truncateReturnsAValidPrefixWithinTheCapGenerators(): array
+    {
+        return [
+            'value' => Gen::frequency([[3, Gen::bytes(0, 80)], [1, Gen::naughtyString()]]),
+            'maximumBytes' => Gen::intBetween(1, 64),
+        ];
+    }
+
+    /**
+     * On valid UTF-8 the cut loses at most the one character the cap split:
+     * the result is the longest whole-character prefix that fits.
+     */
+    #[Property(runs: 300)]
+    public function truncateKeepsTheLongestWholeCharacterPrefix(string $value, int $maximumBytes): void
+    {
+        $truncated = Utf8Text::truncate(value: $value, maximumBytes: $maximumBytes);
+        $fits = strlen($value) <= $maximumBytes;
+
+        Classify::cover($fits, 'fits', 10);
+        Classify::cover(!$fits, 'cut', 10);
+
+        if ($fits) {
+            Assert::same($truncated, $value);
+
+            return;
+        }
+
+        $next = mb_substr(substr($value, strlen($truncated)), 0, 1);
+
+        Assert::true(strlen($truncated) + strlen($next) > $maximumBytes);
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    public static function truncateKeepsTheLongestWholeCharacterPrefixGenerators(): array
+    {
+        return [
+            // One character of every UTF-8 width, so the cap lands inside
+            // two-, three- and four-byte sequences.
+            'value' => Gen::stringFrom("a\u{E9}\u{20AC}\u{1F600}", 0, 30),
+            'maximumBytes' => Gen::intBetween(1, 48),
+        ];
+    }
+
+    /** @return iterable<string, array{string, int}> */
+    public static function truncateKeepsTheLongestWholeCharacterPrefixExamples(): iterable
+    {
+        yield 'cap inside a two-byte character' => ["a\u{E9}", 2];
+        yield 'cap inside a three-byte character' => ["\u{20AC}\u{20AC}", 4];
+        yield 'cap inside a four-byte character' => ["\u{1F600}", 3];
+        yield 'cap on a boundary' => ["\u{E9}\u{E9}", 2];
+    }
+
+    /**
+     * Status first, body second: only a 2xx may be refused as malformed, and
+     * an error status keeps its class whatever the body is.
+     *
+     * @param int<200, 599> $status
+     */
+    #[Property(runs: 400)]
+    public function classifiesByStatusWhateverTheBody(int $status, string $body): void
+    {
+        $success = $status >= 200 && $status <= 299;
+        Classify::cover($success, '2xx', 10);
+        Classify::cover($status >= 400 && $status <= 499, '4xx', 10);
+        Classify::cover($status >= 500, '5xx', 10);
+        Classify::label($body === '' ? 'empty body' : substr($body, 0, 1));
+
+        $isObject = str_starts_with($body, '{');
+        $expected = match (true) {
+            $success => $isObject ? null : MalformedResponseException::class,
+            $status === 401 => UnauthorizedException::class,
+            $status === 403 => ForbiddenException::class,
+            $status === 404 => NotFoundException::class,
+            $status === 429 => RateLimitedException::class,
+            $status >= 500 => ServerException::class,
+            default => PaymentException::class,
+        };
+
+        try {
+            $decoded = (new JsonResponseDecoder())->decode(new Response(status: $status, body: $body));
+        } catch (PaymentException $exception) {
+            Assert::true($expected !== null);
+            Assert::true($exception instanceof $expected);
+
+            if ($expected === PaymentException::class) {
+                Assert::false($exception instanceof MalformedResponseException);
+                Assert::false($exception instanceof ServerException);
+                Assert::false($exception instanceof RateLimitedException);
+            }
+
+            return;
+        }
+
+        Assert::null($expected);
+        Assert::true(is_array($decoded));
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    public static function classifiesByStatusWhateverTheBodyGenerators(): array
+    {
+        return [
+            'status' => Gen::intBetween(200, 599),
+            'body' => Gen::elements([
+                '',
+                '<html><body>502 Bad Gateway</body></html>',
+                'null',
+                '[]',
+                '"text"',
+                '{}',
+                '{"error":{"type":"card_error","message":"Declined"}}',
+                '{"error":{"type":"idempotency_error"}}',
+                '{"id":"pay_1"}',
+            ]),
+        ];
+    }
 }

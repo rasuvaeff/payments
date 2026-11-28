@@ -71,6 +71,29 @@ make release-check
   currency; arithmetic requires matching currencies, throws on overflow and on
   negative results, and `multiply()` takes an integer numerator/denominator with
   half-up rounding. Never introduce float math or float-accepting factories.
+- **`minorUnits` means ISO 4217 minor units.** The core fixes the meaning
+  and carries no exponent table; every adapter converts to its provider's wire
+  format and refuses an amount it cannot represent before any HTTP call. Do not
+  document "provider units" anywhere — two adapters of one stack would then
+  charge different amounts for the same `Money`.
+- **Two amounts on an attempt.** `amount` is created/authorized and never
+  rewritten by a capture; `capturedAmount` is the provider's gross captured
+  total (`null` = not reported, zero = not captured yet — a pending capture
+  included; refunds never reduce it). Do not cap `capturedAmount` at `amount` (Stripe
+  overcapture) and do not derive it from `state` in the core.
+- **A create always carries a key.** `CreatePaymentRequest::$idempotencyKey`
+  is non-null: given verbatim or a generated UUID v4 (36 chars, under PayPal's
+  108). Do not reintroduce a nullable create key or generate keys for the
+  other requests without a design decision — a generated key is only
+  retry-safe when the same request object is resent.
+- **Idempotency-key caps live in adapters.** The core cap (255 bytes) is the
+  widest provider's; lowering it is a break for callers of other adapters. An
+  adapter with a lower provider cap validates before the HTTP call.
+- **Mappers own value-object errors.** Only `MalformedResponseException` and
+  `UnsupportedWebhookEventException` from `map()` are terminal; a mapper must
+  convert core VO `\InvalidArgumentException` into `MalformedResponseException`.
+  Treating every `\InvalidArgumentException` as terminal in the processor would
+  silently 204 a mis-wired adapter, so the conversion stays the mapper's job.
 - **`PaymentIntent` vs `PaymentAttempt`.** The intent is the application-owned
   aggregate (id, amount, attempts with matching currency); an attempt is one
   provider execution carrying `OperationId`, provider-matched references,

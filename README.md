@@ -49,10 +49,12 @@ Arithmetic requires matching currencies and throws `\OverflowException` instead
 of wrapping. `multiply()` takes an integer numerator/denominator, so percentage
 math never touches floating point.
 
-Use `equals()` when reconciliation compares the authoritative provider amount
-against the order. It compares the currency too: `$attempt->amount->minorUnits
-=== $order->total` accepts 1000 JPY for a 1000 USD order, and that is the half
-that gets forgotten when the comparison is hand-rolled.
+Use `equals()` when reconciliation compares what the provider collected
+against the order — `$attempt->capturedAmount`, not `$attempt->amount` (see
+"Two amounts" below; the cookbook has the full recipe, including a `null`
+captured amount). It compares the currency too: `$collected->minorUnits ===
+$order->total` accepts 1000 JPY for a 1000 USD order, and that is the half that
+gets forgotten when the comparison is hand-rolled.
 
 | Value object | Meaning |
 |---|---|
@@ -141,6 +143,108 @@ validated as a header token: non-empty, at most 255 bytes, no control
 characters or spaces. Rejecting it at construction beats a PSR-7 error thrown
 deep inside the transport that names neither the field nor the request.
 
+#### What the contract fixes for adapters
+
+**Minor units are ISO 4217.** `Money::$minorUnits` counts the currency's ISO
+4217 minor unit: cents for USD and EUR (exponent 2), whole yen for JPY and
+whole krónur for ISK (exponent 0), fils for KWD and BHD (exponent 3). The core
+carries no exponent table; it fixes the meaning, so one `Money` is the same
+amount for every adapter of the stack. Where a provider's wire format differs,
+the adapter converts. Before any HTTP call it refuses an amount it cannot
+represent exactly, with `\InvalidArgumentException`, and it converts back when
+it maps a response. Known cases:
+
+| Provider | Currencies | Wire format | The adapter must |
+|---|---|---|---|
+| Stripe | ISK, UGX | two-decimal (`500` charges 5 ISK); ISO exponent 0 | multiply by 100 on the way out, divide on the way back |
+| Stripe | BHD, JOD, KWD, OMR, TND | three-decimal, last digit must be `0` | refuse an amount not divisible by 10 |
+| Stripe | MGA | zero-decimal (`500` charges 500 MGA); ISO exponent 2 | refuse an amount not divisible by 100, send `minorUnits / 100`, multiply by 100 on the way back |
+| PayPal | HUF, TWD | zero-decimal value; ISO exponent 2 | refuse an amount not divisible by 100, send `minorUnits / 100` |
+
+The table lists the cases found by the 2026-11-28 review; check the provider's
+current currency list when an adapter adds a currency.
+
+**A zero amount is accepted** by `Money` and `CreatePaymentRequest`, because
+the core cannot know a provider's minimum charge. The provider refuses it, and
+the adapter raises that refusal as a `PaymentException`. If a clearer error
+matters, validate the order total before creating a payment.
+
+**Two amounts: created and captured.** `PaymentAttempt::$amount` is the amount
+the payment was created for, as the provider reports it; for an authorization
+that is the authorized amount, and a capture does not change it.
+`PaymentAttempt::$capturedAmount` is the **gross** amount the provider has
+captured so far:
+
+| `capturedAmount` | Meaning |
+|---|---|
+| `null` | the response does not say (the adapter has nothing to map) |
+| zero | no money captured yet — an authorization in `RequiresCapture`, a capture the provider still holds as pending, an unpaid payment |
+| equal to `amount` | an automatic or full capture succeeded |
+| less than `amount` | a partial capture; the rest of the authorization is released or still capturable, per provider |
+
+Refunds never reduce it: a refunded payment still reports what was captured,
+as Stripe's `amount_received` does, and refunds are tracked through
+`RefundAttempt`. So zero means "not captured", never "captured and refunded".
+
+Reconcile what was collected against `capturedAmount`, not `amount`: after a
+partial capture `$attempt->amount->equals($order->total)` is still true. The
+attempt refuses a `capturedAmount` in another currency; it does not cap it at
+`amount`, because a provider with overcapture can take more and is
+authoritative. Adapters map it from the response:
+
+| Provider | `amount` | `capturedAmount` |
+|---|---|---|
+| Stripe PaymentIntent | `amount` | `amount_received`, which a refund does not reduce (`amount_capturable` is what is still capturable, not captured) |
+| PayPal order | `purchase_units[0].amount` | sum of `purchase_units[0].payments.captures[].amount` with status `COMPLETED`, `PARTIALLY_REFUNDED` or `REFUNDED`, at the captured amount (refunds are not subtracted); a `PENDING`, `DECLINED`, `DENIED` or `FAILED` capture counts zero; zero for an order not captured yet; `null` for a `COMPLETED` order whose response carries no capture, or a capture in an undocumented status (the response does not say) |
+| PayPal capture | the capture's `amount` | the same rule for the one capture: `COMPLETED`, `PARTIALLY_REFUNDED`, `REFUNDED` → its amount; `PENDING`, `DECLINED`, `DENIED`, `FAILED` → zero; an undocumented status → `null` |
+
+An adapter that cannot read the captured amount from a response leaves it
+`null` rather than guessing from the state.
+
+**Every create carries a key.** `CreatePaymentRequest::$idempotencyKey` is a
+non-empty string. A key you pass is used verbatim; without one the request
+mints a random UUID v4 (36 characters). The effective key exists before the
+call, so it reaches the adapter (`Idempotency-Key` for Stripe,
+`PayPal-Request-Id` for PayPal) and survives the failure that matters — a
+timeout, after which there is no attempt to read anything from:
+
+```php
+$request = new CreatePaymentRequest(operationId: $op, amount: $total, paymentMethod: $pm);
+$store->rememberKey($order, $request->idempotencyKey);   // optional: survive a restart
+
+$attempt = $retry->run(fn () => $gateway->createPayment($request));   // same object, same key
+```
+
+Build the request once, outside the retry loop: a closure that calls
+`new CreatePaymentRequest(...)` mints a new key on every try, and each try is
+a new payment. To retry from another process, pass the remembered key back as
+`idempotencyKey:`. For capture, confirm, cancel and refund the key stays
+optional and is never generated; the adapters of this family send no key when
+it is `null`, and such a request is not retry-safe. See the cookbook section
+"OperationId vs idempotency key".
+
+The core caps a key at 255 bytes, Stripe's limit. A provider may accept less:
+PayPal's `PayPal-Request-Id` is at most 108 characters. An adapter whose
+provider has a lower cap must reject a longer key with
+`\InvalidArgumentException` before the HTTP call, and state its cap in its
+README. The core limit stays at 255, so a key valid for one adapter can be
+refused by another; if your application routes between providers, keep keys
+within the smallest cap.
+
+**Mappers convert value-object errors.** A response or webhook mapper that
+builds core value objects from provider data catches their
+`\InvalidArgumentException` (an unknown currency, an oversized id) and rethrows
+it as `MalformedResponseException`. `WebhookProcessor` treats only
+`MalformedResponseException` and `UnsupportedWebhookEventException` from
+`map()` as terminal; any other exception releases the claim and is answered
+503, so an unconverted value-object error makes the same payload redeliver
+forever. The event-type extractor and the recognizer run outside that
+handling: for a body they cannot read they return `null`, which becomes
+`UnknownWebhookEvent`, instead of throwing.
+
+**Refund states have no transition map.** A Stripe refund can move from
+`succeeded` to `failed` later. Re-fetch a refund before acting on its outcome.
+
 Capabilities are typed values in an immutable `CapabilitySet`:
 
 ```php
@@ -199,7 +303,12 @@ $payload = (new JsonResponseDecoder())->decode($response);
 
 `Psr18Transport` only delegates to the injected client. Retry and timeout
 policies remain application decorators. `FormRequestBuilder` encodes
-`application/x-www-form-urlencoded` bodies from scalar-only data.
+`application/x-www-form-urlencoded` bodies from scalar-only data. Both
+builders send a `GET`, `HEAD` or `DELETE` with empty data without a body and
+without `Content-Type` (RFC 9110 gives such a body no defined semantics, and a
+spec-validating server answers `415` to `{}` on a `GET`); `POST`, `PUT` and
+`PATCH` with empty data keep `{}` (JSON) or an empty form body. Method names
+are compared case-sensitively, as RFC 9110 defines them.
 `AuthContext` (`bearer()`, `basic()`, `fromHeaders()`) is an in-memory header
 handoff. `JsonResponseDecoder` maps HTTP and provider error payloads to typed
 `PaymentException` subclasses and never logs credentials or raw headers:
@@ -211,14 +320,45 @@ handoff. `JsonResponseDecoder` maps HTTP and provider error payloads to typed
 | 404 | `NotFoundException` |
 | 429 | `RateLimitedException` |
 | 5xx | `ServerException` |
+| `idempotency_error` type / `idempotency_key_in_use` code | `IdempotencyConflictException` |
 | `refund_error` type / refund code | `RefundFailedException` |
 | `card_error` / `decline` type | `ProviderDeclinedException` |
 | Other non-2xx | `PaymentException` |
-| Not a JSON object | `MalformedResponseException` |
+| 2xx body that is not a JSON object | `MalformedResponseException` |
 | PSR-18 failure | `TransportException` |
 
+The status decides before the body is read. An error answer whose body is not a
+JSON object — the HTML or empty page a load balancer, CDN or WAF serves during
+an outage — still raises the exception of its status row, with the message
+`Payment provider request failed` and no provider metadata. So a 5xx stays a
+retryable `ServerException`; `MalformedResponseException` only means a
+successful answer could not be read. An empty or blank `error.message` gets the
+same fixed message.
+
 `PaymentException` exposes sanitized `providerCode`, `providerType`,
-`providerParameter` and allow-listed scalar `details`.
+`providerParameter` and allow-listed scalar `details`: `request_id` and
+`retry_after` from the top level of the body, `decline_code` and
+`payment_intent` (the id of `error.payment_intent`) from the error object. A
+card declined while a create was confirming leaves the payment behind at the
+provider, and `details['payment_intent']` is how to retry on it instead of
+creating a second one. The decoder reads no response headers, so a provider
+that sends its request id or `Retry-After` only as a header leaves those keys
+empty — read them from the response in the adapter.
+
+`IdempotencyConflictException` usually means the key was reused with a request
+that differs from the first: a caller bug. Retrying with the same key fails the
+same way and retrying with a new key repeats the operation, so neither is a
+retry policy. One case is retryable: `providerCode` `idempotency_key_in_use`
+(Stripe answers 409) means a concurrent request with the same key is still
+running, and retrying later with the same key returns its result. Stripe
+documents that code without the error type it comes with, so the decoder
+classifies it by the code alone; a status row (429, 5xx) still wins. The
+retryable code is the provider's, so a retry policy keys on `providerCode` per
+provider: `idempotency_key_in_use` for Stripe, `PREVIOUS_REQUEST_IN_PROGRESS`
+for `rasuvaeff/payments-paypal` (Payments v2 answers 409 while an earlier call
+with the same `PayPal-Request-Id` is still being processed). The refund row matches any provider code containing `refund`, which also
+catches codes such as `charge_already_refunded`; an adapter that needs a finer
+split classifies by `providerCode` itself.
 
 ### Webhooks
 
@@ -324,7 +464,7 @@ header:
 | Transport | `TransportInterface`, `Psr18Transport`, `TransportException` |
 | Request building | `RequestBuilderInterface`, `RawJsonRequestBuilderInterface`, `JsonRequestBuilder`, `FormRequestBuilder`, `AuthContext` |
 | Response decoding | `ResponseDecoderInterface`, `JsonResponseDecoder`, `MalformedResponseException` |
-| Provider failures | `PaymentException`, `UnauthorizedException`, `ForbiddenException`, `NotFoundException`, `RateLimitedException`, `ProviderDeclinedException`, `RefundFailedException`, `ServerException` |
+| Provider failures | `PaymentException`, `UnauthorizedException`, `ForbiddenException`, `NotFoundException`, `RateLimitedException`, `ProviderDeclinedException`, `RefundFailedException`, `IdempotencyConflictException`, `ServerException` |
 | Webhook input/results | `WebhookInput`, `WebhookValidationResult`, `ValidWebhook`, `InvalidWebhook`, `WebhookProcessingResult`, `ProcessedWebhook`, `WebhookValidationFailed`, `UnknownWebhookEvent`, `UnsupportedWebhookEvent`, `RejectedWebhookEvent`, `ReplayedWebhookEvent`, `WebhookAcknowledgementPolicy` |
 | Webhook adapter contracts | `WebhookValidatorInterface`, `WebhookEventTypeExtractorInterface`, `WebhookEventRecognizerInterface`, `WebhookPayloadMapperInterface`, `UnsupportedWebhookEventException` |
 | Webhook persistence contracts | `WebhookEventStoreInterface`, `WebhookClaimToken`, `WebhookEventQueueInterface`, `WebhookReconcilerInterface`, `WebhookEventAcceptanceInterface` |
@@ -347,7 +487,15 @@ to the six outcomes shipped here, so calling the concrete processor allows an
 exhaustive `instanceof` chain; calling through `WebhookProcessorInterface` means
 handling an unknown outcome.
 
-`WebhookInput::header()` requires a non-empty header name.
+`WebhookInput::header()` requires a non-empty header name. Header names given
+to `WebhookInput` must be RFC 9110 tokens (letters, digits and
+``!#$%&'*+-.^_`|~``); an all-digit name that PHP turned into an int array key
+is accepted as its string. It stays an int key in `headers()` and
+`sanitizedHeaders()` (PHP cannot hold `"123"` as a string key), so cast the key
+with `(string)` before passing it on as a name. Anything else throws `\InvalidArgumentException`,
+which `WebhookController` answers like any processing exception — 503
+`processing_failed`, logged. A PSR-7 request cannot carry such a name, so from
+the controller this only fires on a broken message implementation.
 
 ## What your application implements
 
@@ -361,13 +509,21 @@ stack):
 | `WebhookEventQueueInterface` **or** `WebhookReconcilerInterface` | The durable boundary: a queue for `AfterValidation`, an authoritative re-fetch + persistence flow for `AfterPersistence` |
 | Intent/attempt persistence | `PaymentIntent`/`PaymentAttempt` projections; adapters only return attempts |
 | `GatewaySelectionPolicyInterface` | Business routing (or `FixedGatewaySelectionPolicy` for a single provider) |
-| Token cache for OAuth providers | E.g. PayPal — `rasuvaeff/payments-paypal` ships `PayPalCachedTokenProvider`, so only wiring remains |
+| Token cache for OAuth providers | E.g. PayPal — the `rasuvaeff/payments-paypal` adapter (not published yet) ships `PayPalCachedTokenProvider`, so only wiring remains |
 | Retry/timeout decorators | Transport stays dumb by design; retry only idempotent operations |
 
 ## Security
 
 `AuthContext` is an in-memory handoff, not a serializable credentials DTO.
-Credentials must never be placed in URLs or logs. Error decoding retains only
+`serialize()` throws `\LogicException`, `var_dump()`/`print_r()` and Symfony
+VarDumper (`dump()`/`dd()`, checked with 8.2) show the header names with
+`[REDACTED]` values, and the credential parameters of `bearer()`,
+`basic()` and `fromHeaders()` are `#[\SensitiveParameter]`, so a factory that
+throws does not put the secret into the stack trace. `var_export()` and an
+`(array)` cast read the private property directly, as does a dumper that
+ignores `__debugInfo()`; do not use them on it.
+`basic()` rejects a username containing `:` (RFC 7617 splits the pair at the
+first colon). Credentials must never be placed in URLs or logs. Error decoding retains only
 the provider code/type/parameter plus allow-listed request and retry metadata;
 raw response headers and arbitrary payload values are discarded, and provider
 text is capped at 1024 bytes before it travels on inside an exception message.
@@ -429,7 +585,11 @@ A permanently unmappable payload is not retryable either. `WebhookProcessor`
 turns `MalformedResponseException` from a mapper into `RejectedWebhookEvent`,
 completes the claim and lets the bridge acknowledge: the same bytes would fail
 the same way forever, and providers disable an endpoint that keeps failing,
-which loses the *following*, healthy events. Record rejections for a human —
+which loses the *following*, healthy events. The same holds for
+`UnsupportedWebhookEventException` (→ `UnsupportedWebhookEvent`). The outcome's
+`reason` is the exception message capped at 1024 bytes on a character boundary;
+a blank message gets a fixed fallback, so no message text can turn the terminal
+verdict back into a retryable failure. Record rejections for a human —
 they mean the adapter and the provider disagree about the payload format.
 Queue implementations must be idempotent by provider and provider event id so
 a process failure around the durable boundary cannot duplicate business work.

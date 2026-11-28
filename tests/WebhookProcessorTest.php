@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Rasuvaeff\Payments\Tests;
 
+use Rasuvaeff\Payments\Internal\Utf8Text;
 use Rasuvaeff\Payments\InvalidWebhook;
 use Rasuvaeff\Payments\MalformedResponseException;
 use Rasuvaeff\Payments\ObservedPaymentEvent;
@@ -16,6 +17,7 @@ use Rasuvaeff\Payments\QueuedWebhookEventAcceptance;
 use Rasuvaeff\Payments\RejectedWebhookEvent;
 use Rasuvaeff\Payments\ReplayedWebhookEvent;
 use Rasuvaeff\Payments\SynchronousWebhookEventAcceptance;
+use Rasuvaeff\Payments\Tests\Support\WebhookLifecycleMachine;
 use Rasuvaeff\Payments\UnknownWebhookEvent;
 use Rasuvaeff\Payments\UnsupportedWebhookEvent;
 use Rasuvaeff\Payments\UnsupportedWebhookEventException;
@@ -33,10 +35,16 @@ use Rasuvaeff\Payments\WebhookProcessor;
 use Rasuvaeff\Payments\WebhookReconcilerInterface;
 use Rasuvaeff\Payments\WebhookValidationFailed;
 use Rasuvaeff\Payments\WebhookValidatorInterface;
+use Rasuvaeff\PropertyTesting\ArbitraryInterface;
+use Rasuvaeff\PropertyTesting\Classify;
+use Rasuvaeff\PropertyTesting\Gen;
+use Rasuvaeff\PropertyTesting\Property;
+use Rasuvaeff\PropertyTesting\StateMachine\RuleSequence;
 use Rasuvaeff\Understudy\Arg;
 use Rasuvaeff\Understudy\Understudy;
 use Testo\Assert;
 use Testo\Codecov\Covers;
+use Testo\Data\DataProvider;
 use Testo\Expect;
 use Testo\Lifecycle\BeforeTest;
 use Testo\Test;
@@ -49,6 +57,7 @@ use function Rasuvaeff\Understudy\when;
 #[Covers(QueuedWebhookEventAcceptance::class)]
 #[Covers(SynchronousWebhookEventAcceptance::class)]
 #[Covers(UnsupportedWebhookEventException::class)]
+#[Covers(Utf8Text::class)]
 final class WebhookProcessorTest
 {
     private WebhookValidatorInterface $validator;
@@ -283,6 +292,53 @@ final class WebhookProcessorTest
     }
 
     /**
+     * The reason of a terminal outcome comes from a mapper's exception
+     * message, and a mapper may echo payload text into it. A message the
+     * outcome constructor refuses (blank, or longer than its 1024-byte cap)
+     * must not turn the terminal verdict into an exception: that releases
+     * the claim and answers 503, so the same poison payload is redelivered
+     * forever — the retry storm terminality exists to prevent.
+     */
+    #[DataProvider('unrepresentableReasonProvider')]
+    public function keepsPermanentMappingFailuresTerminalWhateverTheirMessage(
+        \Throwable $failure,
+        string $outcome,
+        string $reason,
+    ): void {
+        $this->stubPipeline();
+        when(fn() => $this->mapper->map(Arg::any(), Arg::any()))->throws($failure);
+        $result = $this->queuedProcessor()->process(input: $this->input());
+
+        Assert::instanceOf($result, $outcome);
+        Assert::true($result instanceof RejectedWebhookEvent || $result instanceof UnsupportedWebhookEvent);
+        Assert::same($result->reason, $reason);
+        verify(fn() => $this->store->complete(Arg::any(), Arg::any(), $this->token), times: 1);
+        verify(fn() => $this->store->release(Arg::any(), Arg::any(), Arg::any()), never: true);
+    }
+
+    /**
+     * @return iterable<string, array{\Throwable, class-string, string}>
+     */
+    public static function unrepresentableReasonProvider(): iterable
+    {
+        $long = str_repeat('x', 2_000);
+        $atLimit = str_repeat('a', 1_024);
+        // The 1024th byte is the first half of a two-byte "é": the cut walks
+        // back to 1023 bytes instead of leaving a broken sequence.
+        $straddling = 'x' . str_repeat('é', 1_000);
+
+        yield 'malformed, 2000 bytes' => [new MalformedResponseException($long), RejectedWebhookEvent::class, str_repeat('x', 1_024)];
+        yield 'malformed, 1025 bytes' => [new MalformedResponseException($atLimit . 'b'), RejectedWebhookEvent::class, $atLimit];
+        yield 'malformed, exactly 1024 bytes' => [new MalformedResponseException($atLimit), RejectedWebhookEvent::class, $atLimit];
+        yield 'malformed, cut inside a character' => [new MalformedResponseException($straddling), RejectedWebhookEvent::class, 'x' . str_repeat('é', 511)];
+        yield 'malformed, whitespace' => [new MalformedResponseException(" \t\n"), RejectedWebhookEvent::class, 'Webhook payload cannot be mapped'];
+        yield 'malformed, blank within the cap' => [new MalformedResponseException(str_repeat(' ', 1_024) . 'x'), RejectedWebhookEvent::class, 'Webhook payload cannot be mapped'];
+        yield 'unsupported, 2000 bytes' => [new UnsupportedWebhookEventException(str_repeat('y', 2_000)), UnsupportedWebhookEvent::class, str_repeat('y', 1_024)];
+        yield 'unsupported, whitespace' => [new UnsupportedWebhookEventException(' '), UnsupportedWebhookEvent::class, 'Webhook event is unsupported'];
+        yield 'unsupported, blank within the cap' => [new UnsupportedWebhookEventException(str_repeat(' ', 1_024) . 'y'), UnsupportedWebhookEvent::class, 'Webhook event is unsupported'];
+    }
+
+    /**
      * The claim outlives a crash that never reaches `release()`. Only a
      * completion signal lets a store tell an abandoned claim from a finished
      * one, so the processor must emit it exactly once, after acceptance.
@@ -505,5 +561,39 @@ final class WebhookProcessorTest
             occurredAt: new \DateTimeImmutable('2026-08-03T12:00:00+00:00'),
             payload: ['amount' => 1_200],
         );
+    }
+
+    /**
+     * Any interleaving of deliveries — each answered by the adapter in one
+     * of the scripted modes — and of another worker holding and dropping a
+     * claim keeps the delivery guarantee: an event is queued at most once,
+     * a terminal verdict is final, a failure leaves the event redeliverable
+     * and a held claim is never finalised by the processor — not even by
+     * the stale token of a delivery whose lease ran out mid-processing.
+     */
+    #[Property(runs: 200)]
+    public function claimLifecycleKeepsTheDeliveryGuarantee(RuleSequence $sequence): void
+    {
+        $machine = null;
+        $sequence->run(static function () use (&$machine): WebhookLifecycleMachine {
+            return $machine = new WebhookLifecycleMachine();
+        });
+        \assert($machine instanceof WebhookLifecycleMachine);
+
+        // About half of the lowest share measured over repeated 200-run
+        // samples with ten modes (2026-11-28): ok 17-19%, replayed 44-47%,
+        // released 26-34%, held 28-38%, invalid 28-29%, unknown 15-21%,
+        // unsupported 21-23%, malformed 15-25%, long reason 15-20%, blank
+        // reason 15%, lease lost 18-21% — yet one 200-run sample in ~200 suites
+        // measured 8 %, under the old gate of 9; it now sits at 4 (2026-11-28).
+        foreach (['ok' => 8, 'replayed' => 20, 'released' => 12, 'held elsewhere' => 13, 'invalid' => 14, 'unknown' => 7, 'unsupported' => 10, 'malformed' => 7, 'long reason' => 7, 'blank reason' => 7, 'lease lost' => 4] as $label => $minimum) {
+            Classify::cover(isset($machine->seen[$label]), $label, $minimum);
+        }
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    public static function claimLifecycleKeepsTheDeliveryGuaranteeGenerators(): array
+    {
+        return ['sequence' => Gen::rules(WebhookLifecycleMachine::class, minLength: 0, maxLength: 20)];
     }
 }

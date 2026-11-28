@@ -49,10 +49,12 @@ $total->isGreaterThan($price);                         // требует оди�
 переполнения. `multiply()` принимает целочисленные числитель/знаменатель, так
 что процентные расчёты никогда не касаются плавающей точки.
 
-`equals()` — для сверки авторитетной суммы провайдера с суммой заказа при
-reconciliation. Он сравнивает и валюту: `$attempt->amount->minorUnits ===
-$order->total` примет 1000 JPY за заказ на 1000 USD, и именно про эту половину
-забывают, когда сверку пишут руками.
+`equals()` — для сверки собранного провайдером с суммой заказа при
+reconciliation: `$attempt->capturedAmount`, а не `$attempt->amount` (см. «Две
+суммы» ниже; полный рецепт, включая `null` вместо захваченной суммы, — в
+cookbook). Он сравнивает и валюту: `$collected->minorUnits === $order->total`
+примет 1000 JPY за заказ на 1000 USD, и именно про эту половину забывают, когда
+сверку пишут руками.
 
 | Value-объект | Смысл |
 |---|---|
@@ -143,6 +145,111 @@ payload) и `DisplayInstructions` (тип инструкции + текст + с
 символов и пробелов. Отклонить его при конструировании лучше, чем получить
 ошибку PSR-7 из глубины транспорта, которая не назовёт ни поля, ни запроса.
 
+#### Что контракт фиксирует для адаптеров
+
+**Минорные единицы — по ISO 4217.** `Money::$minorUnits` считает минорную
+единицу валюты по ISO 4217: центы для USD и EUR (экспонента 2), целые иены для
+JPY и целые кроны для ISK (экспонента 0), филсы для KWD и BHD (экспонента 3).
+Таблицы экспонент в ядре нет; ядро фиксирует смысл, чтобы один `Money` значил
+одну и ту же сумму для любого адаптера стека. Если формат провайдера на проводе
+отличается, конвертирует адаптер. До любого HTTP-вызова он отвергает сумму,
+которую не может представить точно, через `\InvalidArgumentException`, а при
+маппинге ответа конвертирует обратно. Известные случаи:
+
+| Провайдер | Валюты | Формат на проводе | Адаптер обязан |
+|---|---|---|---|
+| Stripe | ISK, UGX | двухзнаковый (`500` списывает 5 ISK); экспонента ISO 0 | умножать на 100 при отправке и делить при чтении |
+| Stripe | BHD, JOD, KWD, OMR, TND | трёхзнаковый, последняя цифра должна быть `0` | отвергать сумму, не кратную 10 |
+| Stripe | MGA | без дробной части (`500` списывает 500 MGA); экспонента ISO 2 | отвергать сумму, не кратную 100, слать `minorUnits / 100` и умножать на 100 при чтении |
+| PayPal | HUF, TWD | значение без дробной части; экспонента ISO 2 | отвергать сумму, не кратную 100, и слать `minorUnits / 100` |
+
+В таблице — случаи, найденные ревью 2026-11-28; добавляя валюту в адаптер,
+сверяйтесь с актуальным списком провайдера.
+
+**Нулевая сумма принимается** `Money` и `CreatePaymentRequest`: ядро не знает
+минимального списания провайдера. Провайдер её отвергнет, и адаптер поднимет
+отказ как `PaymentException`. Если нужна понятная ошибка, проверяйте сумму
+заказа до создания платежа.
+
+**Две суммы: созданная и захваченная.** `PaymentAttempt::$amount` — сумма, на
+которую создан платёж, в том виде, в каком её сообщает провайдер; для
+авторизации это авторизованная сумма, и capture её не меняет.
+`PaymentAttempt::$capturedAmount` — сколько провайдер уже захватил всего,
+**брутто**:
+
+| `capturedAmount` | Значение |
+|---|---|
+| `null` | ответ об этом не говорит (адаптеру нечего мапить) |
+| ноль | деньги ещё не захвачены — авторизация в `RequiresCapture`, capture, который провайдер держит в ожидании (pending), неоплаченный платёж |
+| равна `amount` | прошёл автоматический или полный capture |
+| меньше `amount` | частичный capture; остаток авторизации освобождён или ещё доступен — зависит от провайдера |
+
+Возвраты её никогда не уменьшают: возвращённый платёж по-прежнему сообщает
+захваченное, как `amount_received` у Stripe, а возвраты учитываются через
+`RefundAttempt`. Поэтому ноль значит «не захвачено», а не «захвачено и
+возвращено».
+
+Сверяйте собранное с `capturedAmount`, а не с `amount`: после частичного
+capture `$attempt->amount->equals($order->total)` по-прежнему истинно. Попытка
+отвергает `capturedAmount` в другой валюте, но не ограничивает его сверху
+`amount`: провайдер с overcapture может списать больше, и он авторитетен.
+Адаптеры мапят поле из ответа:
+
+| Провайдер | `amount` | `capturedAmount` |
+|---|---|---|
+| Stripe PaymentIntent | `amount` | `amount_received`, который возврат не уменьшает (`amount_capturable` — что ещё можно захватить, а не захвачено) |
+| Заказ PayPal | `purchase_units[0].amount` | сумма `purchase_units[0].payments.captures[].amount` со статусом `COMPLETED`, `PARTIALLY_REFUNDED` или `REFUNDED` по захваченной сумме (возвраты не вычитаются); capture в `PENDING`, `DECLINED`, `DENIED` или `FAILED` считается нулём; ноль для заказа, который ещё не захвачен; `null` для заказа в `COMPLETED`, в ответе на который нет capture, или для capture в недокументированном статусе (ответ об этом не говорит) |
+| Capture PayPal | `amount` самого capture | то же правило для одного capture: `COMPLETED`, `PARTIALLY_REFUNDED`, `REFUNDED` → его сумма; `PENDING`, `DECLINED`, `DENIED`, `FAILED` → ноль; недокументированный статус → `null` |
+
+Адаптер, который не может прочитать захваченную сумму из ответа, оставляет
+`null`, а не угадывает её по состоянию.
+
+**Каждый create несёт ключ.** `CreatePaymentRequest::$idempotencyKey` —
+непустая строка. Переданный ключ используется как есть; без него запрос сам
+генерирует случайный UUID v4 (36 символов). Действующий ключ существует до
+вызова, поэтому доходит до адаптера (`Idempotency-Key` у Stripe,
+`PayPal-Request-Id` у PayPal) и переживает тот сбой, который важен, — таймаут,
+после которого читать уже не из чего:
+
+```php
+$request = new CreatePaymentRequest(operationId: $op, amount: $total, paymentMethod: $pm);
+$store->rememberKey($order, $request->idempotencyKey);   // опционально: пережить рестарт
+
+$attempt = $retry->run(fn () => $gateway->createPayment($request));   // тот же объект, тот же ключ
+```
+
+Стройте запрос один раз, вне цикла ретраев: замыкание, вызывающее
+`new CreatePaymentRequest(...)`, на каждой попытке генерирует новый ключ, и
+каждая попытка — новый платёж. Чтобы повторить из другого процесса, передайте
+сохранённый ключ обратно в `idempotencyKey:`. Для capture, confirm, cancel и
+refund ключ остаётся необязательным и никогда не генерируется; адаптеры этого
+семейства при `null` не шлют ключа, и такой запрос небезопасен для ретрая. См.
+раздел cookbook «OperationId против idempotency key».
+
+Ядро ограничивает ключ 255 байтами — лимитом Stripe. Провайдер может принимать
+меньше: `PayPal-Request-Id` у PayPal — не длиннее 108 символов. Адаптер, чей
+провайдер ограничивает строже, обязан отвергать более длинный ключ через
+`\InvalidArgumentException` до HTTP-вызова и указать свой лимит в README. Лимит
+ядра остаётся 255, так что ключ, допустимый для одного адаптера, может быть
+отвергнут другим; если приложение маршрутизирует между провайдерами, держите
+ключи в пределах наименьшего лимита.
+
+**Маперы конвертируют ошибки value-объектов.** Мапер ответа или вебхука,
+строящий value-объекты ядра из данных провайдера, ловит их
+`\InvalidArgumentException` (неизвестная валюта, слишком длинный id) и
+перебрасывает как `MalformedResponseException`. `WebhookProcessor` считает
+терминальными только `MalformedResponseException` и
+`UnsupportedWebhookEventException` из `map()`; любое другое исключение
+освобождает claim и получает ответ 503, так что неконвертированная ошибка
+value-объекта заставляет тот же payload приходить снова бесконечно. Extractor
+типа события и recognizer работают вне этой обработки: для тела, которое они не
+могут прочитать, они возвращают `null` (это даёт `UnknownWebhookEvent`), а не
+бросают исключение.
+
+**У состояний возврата нет карты переходов.** Возврат Stripe может позже
+перейти из `succeeded` в `failed`. Перезапрашивайте возврат, прежде чем
+действовать по его исходу.
+
 Capability — типизированные значения в неизменяемом `CapabilitySet`:
 
 ```php
@@ -201,7 +308,12 @@ $payload = (new JsonResponseDecoder())->decode($response);
 
 `Psr18Transport` только делегирует вызов внедрённому клиенту. Политики повторов
 и таймаутов остаются декораторами приложения. `FormRequestBuilder` кодирует
-тела `application/x-www-form-urlencoded` только из скалярных данных.
+тела `application/x-www-form-urlencoded` только из скалярных данных. Оба
+построителя отправляют `GET`, `HEAD` или `DELETE` с пустыми данными без тела и
+без `Content-Type` (RFC 9110 не определяет семантику такого тела, а сервер,
+проверяющий запрос по спецификации, отвечает `415` на `{}` в `GET`); `POST`,
+`PUT` и `PATCH` с пустыми данными сохраняют `{}` (JSON) или пустое тело формы.
+Имена методов сравниваются с учётом регистра, как их определяет RFC 9110.
 `AuthContext` (`bearer()`, `basic()`, `fromHeaders()`) — in-memory передача
 заголовков. `JsonResponseDecoder` преобразует HTTP- и провайдерские ошибки в
 типизированные подклассы `PaymentException` и никогда не журналирует учётные
@@ -214,14 +326,46 @@ $payload = (new JsonResponseDecoder())->decode($response);
 | 404 | `NotFoundException` |
 | 429 | `RateLimitedException` |
 | 5xx | `ServerException` |
+| Тип `idempotency_error` / код `idempotency_key_in_use` | `IdempotencyConflictException` |
 | Тип `refund_error` / refund-код | `RefundFailedException` |
 | Тип `card_error` / `decline` | `ProviderDeclinedException` |
 | Прочие не-2xx | `PaymentException` |
-| Не JSON-объект | `MalformedResponseException` |
+| Тело 2xx — не JSON-объект | `MalformedResponseException` |
 | Ошибка PSR-18 | `TransportException` |
 
+Статус решает раньше, чем читается тело. Ответ-ошибка, тело которого не
+JSON-объект (HTML или пустая страница балансировщика, CDN или WAF во время
+сбоя), всё равно бросает исключение своей строки по статусу — с сообщением
+`Payment provider request failed` и без провайдерских метаданных. Поэтому 5xx
+остаётся retryable `ServerException`, а `MalformedResponseException` значит
+только то, что не удалось прочитать успешный ответ. Пустой или пробельный
+`error.message` получает то же фиксированное сообщение.
+
 `PaymentException` предоставляет санитизированные `providerCode`,
-`providerType`, `providerParameter` и скалярный `details` по allow-list.
+`providerType`, `providerParameter` и скалярный `details` по allow-list:
+`request_id` и `retry_after` с верхнего уровня тела, `decline_code` и
+`payment_intent` (id из `error.payment_intent`) из объекта ошибки. Карта,
+отклонённая при подтверждении во время create, оставляет платёж у провайдера, и
+`details['payment_intent']` — способ повторить попытку на нём, а не создавать
+второй. Заголовки ответа декодер не читает, поэтому если провайдер шлёт
+request id или `Retry-After` только заголовком, эти ключи пусты — читайте их из
+ответа в адаптере.
+
+`IdempotencyConflictException` обычно значит, что ключ переиспользован с
+запросом, отличным от первого: ошибка вызывающего. Повтор с тем же ключом упадёт
+так же, повтор с новым ключом повторит операцию, поэтому ни то ни другое не
+политика ретраев. Один случай ретраибелен: `providerCode`
+`idempotency_key_in_use` (Stripe отвечает 409) значит, что параллельный запрос с
+тем же ключом ещё выполняется, и повтор позже с тем же ключом вернёт его
+результат. Stripe документирует этот код без типа ошибки, с которым он
+приходит, поэтому декодер классифицирует его по одному коду; строка статуса
+(429, 5xx) по-прежнему важнее. Ретраибельный код принадлежит провайдеру,
+поэтому политика ретраев смотрит на `providerCode` по провайдеру:
+`idempotency_key_in_use` у Stripe, `PREVIOUS_REQUEST_IN_PROGRESS` у
+`rasuvaeff/payments-paypal` (Payments v2 отвечает 409, пока предыдущий вызов с
+тем же `PayPal-Request-Id` ещё обрабатывается). Строка про refund ловит любой провайдерский код, содержащий `refund`,
+включая коды вроде `charge_already_refunded`; адаптер, которому нужно точнее,
+классифицирует по `providerCode` сам.
 
 ### Webhooks
 
@@ -328,7 +472,7 @@ middleware, читается как пустая строка — и тогда 
 | Транспорт | `TransportInterface`, `Psr18Transport`, `TransportException` |
 | Построение запросов | `RequestBuilderInterface`, `RawJsonRequestBuilderInterface`, `JsonRequestBuilder`, `FormRequestBuilder`, `AuthContext` |
 | Декодирование ответов | `ResponseDecoderInterface`, `JsonResponseDecoder`, `MalformedResponseException` |
-| Ошибки провайдера | `PaymentException`, `UnauthorizedException`, `ForbiddenException`, `NotFoundException`, `RateLimitedException`, `ProviderDeclinedException`, `RefundFailedException`, `ServerException` |
+| Ошибки провайдера | `PaymentException`, `UnauthorizedException`, `ForbiddenException`, `NotFoundException`, `RateLimitedException`, `ProviderDeclinedException`, `RefundFailedException`, `IdempotencyConflictException`, `ServerException` |
 | Webhook вход/результаты | `WebhookInput`, `WebhookValidationResult`, `ValidWebhook`, `InvalidWebhook`, `WebhookProcessingResult`, `ProcessedWebhook`, `WebhookValidationFailed`, `UnknownWebhookEvent`, `UnsupportedWebhookEvent`, `ReplayedWebhookEvent`, `WebhookAcknowledgementPolicy` |
 | Контракты webhook-адаптера | `WebhookValidatorInterface`, `WebhookEventTypeExtractorInterface`, `WebhookEventRecognizerInterface`, `WebhookPayloadMapperInterface`, `UnsupportedWebhookEventException` |
 | Контракты webhook-persistence | `WebhookEventStoreInterface`, `WebhookClaimToken`, `WebhookEventQueueInterface`, `WebhookReconcilerInterface`, `WebhookEventAcceptanceInterface` |
@@ -351,7 +495,16 @@ middleware, читается как пустая строка — и тогда 
 процессора допускает исчерпывающую цепочку `instanceof`; вызов через
 `WebhookProcessorInterface` означает обработку неизвестного исхода.
 
-`WebhookInput::header()` требует непустого имени заголовка.
+`WebhookInput::header()` требует непустого имени заголовка. Имена заголовков,
+переданные в `WebhookInput`, должны быть токенами RFC 9110 (буквы, цифры и
+``!#$%&'*+-.^_`|~``); имя из одних цифр, которое PHP превратил в int-ключ
+массива, принимается как строка. В `headers()` и `sanitizedHeaders()` он
+остаётся int-ключом (PHP не хранит `"123"` строковым ключом), поэтому перед
+передачей дальше как имени приведите ключ через `(string)`. Всё остальное бросает
+`\InvalidArgumentException`, и `WebhookController` отвечает на это как на любое
+исключение обработки — 503 `processing_failed` с записью в лог. PSR-7-запрос
+такого имени нести не может, так что из контроллера это срабатывает только на
+сломанной реализации сообщений.
 
 ## Что реализует ваше приложение
 
@@ -365,12 +518,20 @@ middleware, читается как пустая строка — и тогда 
 | `WebhookEventQueueInterface` **или** `WebhookReconcilerInterface` | Durable-граница: очередь для `AfterValidation`, авторитетный re-fetch + персистенция для `AfterPersistence` |
 | Персистенция intent/attempt | Проекции `PaymentIntent`/`PaymentAttempt`; адаптеры только возвращают попытки |
 | `GatewaySelectionPolicyInterface` | Бизнес-маршрутизация (или `FixedGatewaySelectionPolicy` для одного провайдера) |
-| Кэш токенов для OAuth-провайдеров | Например, PayPal — в `rasuvaeff/payments-paypal` есть `PayPalCachedTokenProvider`, остаётся только wiring |
+| Кэш токенов для OAuth-провайдеров | Например, PayPal — в адаптере `rasuvaeff/payments-paypal` (ещё не опубликован) есть `PayPalCachedTokenProvider`, остаётся только wiring |
 | Retry/timeout-декораторы | Транспорт намеренно «глупый»; ретраить только идемпотентные операции |
 
 ## Безопасность
 
 `AuthContext` — in-memory передача, а не сериализуемый DTO учётных данных.
+`serialize()` бросает `\LogicException`, `var_dump()`/`print_r()` и Symfony
+VarDumper (`dump()`/`dd()`, проверено на 8.2) показывают имена заголовков со
+значениями `[REDACTED]`, а параметры с секретом у
+`bearer()`, `basic()` и `fromHeaders()` помечены `#[\SensitiveParameter]`, так
+что бросившая фабрика не кладёт секрет в stack trace. `var_export()` и
+приведение `(array)` читают приватное свойство напрямую, как и дампер, который
+не смотрит на `__debugInfo()`, — к этому объекту их не применять. `basic()` отвергает username с `:` (RFC 7617 делит пару по первому
+двоеточию).
 Учётные данные никогда не должны попадать в URL или логи. Декодирование ошибок
 сохраняет только провайдерские code/type/parameter плюс request- и
 retry-метаданные по allow-list; исходные заголовки ответа и произвольные
@@ -436,7 +597,11 @@ SIGKILL, OOM-killer, `max_execution_time`, фатальная ошибка, ре
 `MalformedResponseException` от маппера в `RejectedWebhookEvent`, завершает
 захват и позволяет мосту подтвердить: те же байты будут падать так же вечно, а
 провайдеры отключают эндпоинт, который постоянно ошибается, — и теряются
-**последующие**, здоровые события. Записывайте отказы для человека: они значат,
+**последующие**, здоровые события. То же для
+`UnsupportedWebhookEventException` (→ `UnsupportedWebhookEvent`). `reason` исхода —
+сообщение исключения, обрезанное до 1024 байт по границе символа; пустое или
+пробельное сообщение заменяется фиксированным, так что никакой текст сообщения
+не превращает терминальный вердикт обратно в retryable-сбой. Записывайте отказы для человека: они значат,
 что адаптер и провайдер разошлись в понимании формата. Реализации очереди должны быть идемпотентны по провайдеру и id
 события провайдера, чтобы сбой процесса вокруг durable-границы не мог
 продублировать бизнес-работу. Webhook-наблюдения никогда не обновляют

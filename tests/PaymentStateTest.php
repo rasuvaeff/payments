@@ -56,68 +56,51 @@ final class PaymentStateTest
         ];
     }
 
-    #[Property(runs: 500, auto: true)]
-    public function transitionTableMatchesDocumentedOracle(PaymentState $from, PaymentState $to): void
+    /**
+     * Every one of the 64 pairs, against a matrix written out by hand.
+     *
+     * A sampled property whose oracle restates the `match` in `src/` repeats
+     * a wrong cell instead of catching it; this grid is the reviewed
+     * specification: row = from, column = to, both in case order. `1`
+     * allows the transition.
+     */
+    #[DataProvider('transitionMatrixProvider')]
+    public function transitionTableMatchesTheReviewedMatrix(PaymentState $from, PaymentState $to, bool $allowed): void
     {
-        $expected = match ($from) {
-            PaymentState::Pending => true,
-            PaymentState::RequiresPaymentMethod => in_array($to, [
-                PaymentState::Pending,
-                PaymentState::RequiresPaymentMethod,
-                PaymentState::RequiresAction,
-                PaymentState::Processing,
-                PaymentState::RequiresCapture,
-                PaymentState::Succeeded,
-                PaymentState::Failed,
-                PaymentState::Canceled,
-            ], strict: true),
-            PaymentState::RequiresAction => in_array($to, [
-                PaymentState::Pending,
-                PaymentState::RequiresPaymentMethod,
-                PaymentState::RequiresAction,
-                PaymentState::Processing,
-                PaymentState::RequiresCapture,
-                PaymentState::Succeeded,
-                PaymentState::Failed,
-                PaymentState::Canceled,
-            ], strict: true),
-            PaymentState::RequiresCapture => in_array($to, [
-                PaymentState::RequiresCapture,
-                PaymentState::Processing,
-                PaymentState::Succeeded,
-                PaymentState::Failed,
-                PaymentState::Canceled,
-            ], strict: true),
-            PaymentState::Processing => in_array($to, [
-                PaymentState::Processing,
-                PaymentState::RequiresPaymentMethod,
-                PaymentState::RequiresAction,
-                PaymentState::RequiresCapture,
-                PaymentState::Succeeded,
-                PaymentState::Failed,
-                PaymentState::Canceled,
-            ], strict: true),
-            PaymentState::Succeeded, PaymentState::Failed, PaymentState::Canceled => $from === $to,
-        };
-
-        Classify::when($from === PaymentState::Pending, 'pending origin');
-        Classify::cover(
-            in_array($from, [PaymentState::Succeeded, PaymentState::Failed, PaymentState::Canceled], strict: true),
-            'terminal origin',
-            5,
-        );
-
-        Assert::same($from->canTransitionTo($to), $expected);
+        Assert::same($from->canTransitionTo($to), $allowed);
     }
 
-    /** @return iterable<string, array{PaymentState, PaymentState}> */
-    public static function transitionTableMatchesDocumentedOracleExamples(): iterable
+    /** @return iterable<string, array{PaymentState, PaymentState, bool}> */
+    public static function transitionMatrixProvider(): iterable
     {
-        yield 'succeeded to failed' => [PaymentState::Succeeded, PaymentState::Failed];
-        yield 'failed to processing' => [PaymentState::Failed, PaymentState::Processing];
-        yield 'pending to succeeded' => [PaymentState::Pending, PaymentState::Succeeded];
-        yield 'same state' => [PaymentState::Processing, PaymentState::Processing];
-        yield 'declined card retried on the same intent' => [PaymentState::RequiresPaymentMethod, PaymentState::Succeeded];
-        yield 'decline returns an actionable intent' => [PaymentState::RequiresAction, PaymentState::RequiresPaymentMethod];
+        $order = [
+            PaymentState::Pending,
+            PaymentState::RequiresPaymentMethod,
+            PaymentState::RequiresAction,
+            PaymentState::RequiresCapture,
+            PaymentState::Processing,
+            PaymentState::Succeeded,
+            PaymentState::Failed,
+            PaymentState::Canceled,
+        ];
+        //            to: pend rpm  ract rcap proc succ fail canc
+        $matrix = [
+            'pending' => '1    1    1    1    1    1    1    1',
+            'requires_payment_method' => '1    1    1    1    1    1    1    1',
+            'requires_action' => '1    1    1    1    1    1    1    1',
+            'requires_capture' => '0    0    0    1    1    1    1    1',
+            'processing' => '0    1    1    1    1    1    1    1',
+            'succeeded' => '0    0    0    0    0    1    0    0',
+            'failed' => '0    0    0    0    0    0    1    0',
+            'canceled' => '0    0    0    0    0    0    0    1',
+        ];
+
+        foreach ($order as $from) {
+            $cells = preg_split('/\s+/', $matrix[$from->value]);
+
+            foreach ($order as $column => $to) {
+                yield $from->value . ' -> ' . $to->value => [$from, $to, $cells[$column] === '1'];
+            }
+        }
     }
 }

@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Rasuvaeff\Payments\Tests;
 
 use Rasuvaeff\Payments\AuthContext;
+use Rasuvaeff\PropertyTesting\ArbitraryInterface;
+use Rasuvaeff\PropertyTesting\Gen;
+use Rasuvaeff\PropertyTesting\Property;
 use Testo\Assert;
 use Testo\Codecov\Covers;
 use Testo\Data\DataProvider;
@@ -50,5 +53,142 @@ final class AuthContextTest
     {
         Expect::exception(\InvalidArgumentException::class);
         AuthContext::fromHeaders(['' => 'secret']);
+    }
+
+    /**
+     * RFC 7617: the user-id cannot contain a colon, since the server splits
+     * the decoded credentials at the first one.
+     */
+    public function rejectsColonInBasicUsername(): void
+    {
+        Expect::exception(\InvalidArgumentException::class)
+            ->withMessage('Basic authentication username must not contain a colon');
+        AuthContext::basic(username: 'client:id', password: 'pass');
+    }
+
+    public function acceptsColonInBasicPassword(): void
+    {
+        Assert::same(
+            AuthContext::basic(username: 'user', password: 'pa:ss')->headers(),
+            ['Authorization' => 'Basic ' . base64_encode('user:pa:ss')],
+        );
+    }
+
+    #[DataProvider('contextProvider')]
+    public function dumpRedactsHeaderValues(AuthContext $context, string $secret): void
+    {
+        $dump = print_r($context, return: true);
+
+        Assert::false(str_contains($dump, $secret));
+        Assert::same($context->__debugInfo(), ["\0" . AuthContext::class . "\0headers" => ['Authorization' => '[REDACTED]']]);
+    }
+
+    /**
+     * Symfony VarDumper (`dump()`, `dd()`, the debug toolbar) reads the
+     * object through an `(array)` cast and then overlays `__debugInfo()`: a
+     * key that names the private property replaces it, any other key is
+     * added beside it. So every property the cast exposes must come back
+     * from `__debugInfo()` under its own mangled name, redacted.
+     */
+    #[DataProvider('contextProvider')]
+    public function debugInfoOverridesEveryPropertyTheCastExposes(AuthContext $context, string $secret): void
+    {
+        $cast = (array) $context;
+        $overlaid = array_replace($cast, $context->__debugInfo());
+
+        Assert::same(array_keys($context->__debugInfo()), array_keys($cast));
+        Assert::false(str_contains(serialize($overlaid), $secret));
+    }
+
+    #[DataProvider('contextProvider')]
+    public function refusesSerialization(AuthContext $context): void
+    {
+        Expect::exception(\LogicException::class)->withMessage('AuthContext must not be serialized');
+        serialize($context);
+    }
+
+    public function refusesUnserialization(): void
+    {
+        Expect::exception(\LogicException::class)->withMessage('AuthContext must not be unserialized');
+        unserialize(sprintf('O:%d:"%s":1:{s:7:"headers";a:0:{}}', strlen(AuthContext::class), AuthContext::class));
+    }
+
+    /** @return iterable<string, array{AuthContext, string}> */
+    public static function contextProvider(): iterable
+    {
+        yield 'bearer' => [AuthContext::bearer('sk_live_secret'), 'sk_live_secret'];
+        yield 'basic' => [AuthContext::basic('client', 'TOPSECRET'), base64_encode('client:TOPSECRET')];
+        yield 'headers' => [AuthContext::fromHeaders(['Authorization' => 'Bearer sk_live_secret']), 'sk_live_secret'];
+    }
+
+    /**
+     * A credential passed to a factory that then throws must not reach the
+     * stack trace's argument list.
+     *
+     * @param non-empty-string $method
+     * @param non-empty-string $parameter
+     */
+    #[DataProvider('sensitiveParameterProvider')]
+    public function marksCredentialParametersSensitive(string $method, string $parameter): void
+    {
+        $attributes = [];
+
+        foreach ((new \ReflectionMethod(AuthContext::class, $method))->getParameters() as $candidate) {
+            if ($candidate->getName() === $parameter) {
+                $attributes = $candidate->getAttributes(\SensitiveParameter::class);
+            }
+        }
+
+        Assert::same(count($attributes), 1);
+    }
+
+    /** @return iterable<string, array{non-empty-string, non-empty-string}> */
+    public static function sensitiveParameterProvider(): iterable
+    {
+        yield 'bearer token' => ['bearer', 'token'];
+        yield 'basic password' => ['basic', 'password'];
+        yield 'header map' => ['fromHeaders', 'headers'];
+        yield 'constructor header map' => ['__construct', 'headers'];
+    }
+
+    /**
+     * Whatever the credential, a dump shows none of it: neither the bearer
+     * token nor the Basic pair, encoded or not. Tokens are long enough not to
+     * occur in the class name by chance.
+     */
+    #[Property(runs: 200)]
+    public function aDumpNeverShowsTheCredential(string $secret, string $user): void
+    {
+        $bearer = AuthContext::bearer($secret);
+        $basic = AuthContext::basic($user, $secret);
+        $headers = AuthContext::fromHeaders(['X-Api-Key' => $secret]);
+
+        Assert::same($bearer->headers(), ['Authorization' => 'Bearer ' . $secret]);
+        Assert::same($headers->headers(), ['X-Api-Key' => $secret]);
+
+        foreach ([$bearer, $basic, $headers] as $context) {
+            foreach ([print_r($context, return: true), $this->varDump($context)] as $dump) {
+                Assert::false(str_contains($dump, $secret));
+                Assert::false(str_contains($dump, base64_encode($user . ':' . $secret)));
+            }
+
+        }
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    public static function aDumpNeverShowsTheCredentialGenerators(): array
+    {
+        return [
+            'secret' => Gen::stringMatching('sk_[A-Za-z0-9]{12,40}'),
+            'user' => Gen::stringMatching('[a-z]{1,12}'),
+        ];
+    }
+
+    private function varDump(AuthContext $context): string
+    {
+        ob_start();
+        var_dump($context);
+
+        return (string) ob_get_clean();
     }
 }

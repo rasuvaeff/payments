@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Rasuvaeff\Payments;
 
 use Psr\Http\Message\ResponseInterface;
+use Rasuvaeff\Payments\Internal\Utf8Text;
 
 /**
  * Decodes JSON objects and maps status/error types without retaining headers.
@@ -22,11 +23,45 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
     private const int HTTP_SERVER_ERROR_MINIMUM = 500;
     private const int MESSAGE_MAXIMUM_LENGTH = 1_024;
 
+    /**
+     * The status decides before the body is read. Only a 2xx answer must be a
+     * JSON object; an error answer whose body is not one — the HTML or empty
+     * page a load balancer, CDN or WAF serves during an outage — is still
+     * classified by its status, so a 5xx stays a retryable `ServerException`
+     * rather than a `MalformedResponseException`.
+     */
     #[\Override]
     public function decode(ResponseInterface $response): array
     {
-        $body = $response->getBody()->getContents();
+        $status = $response->getStatusCode();
+        $stream = $response->getBody();
 
+        // A logging middleware that already read the body leaves the stream
+        // at its end, and getContents() reads only what remains.
+        if ($stream->isSeekable()) {
+            $stream->rewind();
+        }
+
+        $body = $stream->getContents();
+
+        if ($status >= self::HTTP_SUCCESS_MINIMUM && $status <= self::HTTP_SUCCESS_MAXIMUM) {
+            return $this->object(body: $body);
+        }
+
+        try {
+            $payload = $this->object(body: $body);
+        } catch (MalformedResponseException) {
+            $payload = [];
+        }
+
+        throw $this->exceptionFor($status, $payload);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function object(string $body): array
+    {
         try {
             $decoded = json_decode($body, associative: false, depth: 512, flags: JSON_THROW_ON_ERROR);
         } catch (\JsonException $exception) {
@@ -40,11 +75,7 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
         /** @var array<string, mixed> $decoded JSON object property names are strings. */
         $decoded = get_object_vars($decoded);
 
-        if ($response->getStatusCode() >= self::HTTP_SUCCESS_MINIMUM && $response->getStatusCode() <= self::HTTP_SUCCESS_MAXIMUM) {
-            return $decoded;
-        }
-
-        throw $this->exceptionFor($response->getStatusCode(), $decoded);
+        return $decoded;
     }
 
     /**
@@ -59,13 +90,40 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
         $code = $this->stringValue($error, 'code');
         $type = $this->stringValue($error, 'type');
         $parameter = $this->stringValue($error, 'param');
-        $message = $this->stringValue($error, 'message') ?? 'Payment provider request failed';
+        $message = $this->stringValue($error, 'message');
+
+        // A blank provider message is no message: an exception with empty
+        // text would reach the log saying nothing.
+        if ($message === null || trim($message) === '') {
+            $message = 'Payment provider request failed';
+        }
+
         /** @var array<string, scalar|null> $details */
         $details = [];
 
         foreach (['request_id', 'retry_after'] as $key) {
             if (isset($payload[$key]) && (is_string($payload[$key]) || is_int($payload[$key]))) {
                 $details[$key] = $payload[$key];
+            }
+        }
+
+        $declineCode = $this->stringValue($error, 'decline_code');
+
+        if ($declineCode !== null) {
+            $details['decline_code'] = $declineCode;
+        }
+
+        // A card declined while a create was confirming leaves the payment
+        // behind at the provider (Stripe answers 402 with the PaymentIntent).
+        // Its id is the only way to retry on that payment instead of creating
+        // a second one with a new key.
+        if (isset($error['payment_intent']) && $error['payment_intent'] instanceof \stdClass) {
+            /** @var array<string, mixed> $paymentIntent JSON object property names are strings. */
+            $paymentIntent = get_object_vars($error['payment_intent']);
+            $paymentIntentId = $this->stringValue($paymentIntent, 'id');
+
+            if ($paymentIntentId !== null) {
+                $details['payment_intent'] = $paymentIntentId;
             }
         }
 
@@ -80,6 +138,10 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
             $exceptionClass = RateLimitedException::class;
         } elseif ($status >= self::HTTP_SERVER_ERROR_MINIMUM) {
             $exceptionClass = ServerException::class;
+        } elseif ($type === 'idempotency_error' || $code === 'idempotency_key_in_use') {
+            // Stripe documents `idempotency_key_in_use` without naming the
+            // type it comes with, so the code classifies on its own.
+            $exceptionClass = IdempotencyConflictException::class;
         } elseif ($type === 'refund_error' || str_contains($code ?? '', 'refund')) {
             $exceptionClass = RefundFailedException::class;
         } elseif ($type === 'card_error' || $type === 'decline') {
@@ -102,20 +164,10 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
      * messages end up in logs and error reports. It echoes request fields back
      * and carries no documented length bound, so it is capped before being
      * carried any further.
-     *
-     * The cut is by bytes, then walked back until the result is valid UTF-8
-     * again: a byte cap can land inside a multi-byte sequence, and a broken
-     * sequence would make the log record itself unserializable.
      */
     private function truncate(string $value): string
     {
-        $capped = substr($value, 0, self::MESSAGE_MAXIMUM_LENGTH);
-
-        while (preg_match('//u', $capped) !== 1) {
-            $capped = substr($capped, 0, -1);
-        }
-
-        return $capped;
+        return Utf8Text::truncate(value: $value, maximumBytes: self::MESSAGE_MAXIMUM_LENGTH);
     }
 
     /**
