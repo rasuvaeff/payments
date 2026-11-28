@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.3.0 — 2026-11-28
+
+Review 2026-11-28 fixes (#15).
 
 - **Docs:** the retryable idempotency conflict is named per provider: `IdempotencyConflictException`, README and `llms.txt` said the only retryable case was `providerCode` `idempotency_key_in_use` (Stripe); `rasuvaeff/payments-paypal` raises the same exception with `PREVIOUS_REQUEST_IN_PROGRESS` (Payments v2 409 while an earlier call with the same `PayPal-Request-Id` is still being processed), and a retry policy written from the core docs would have treated it as a caller bug.
 - **Fixed:** `JsonRequestBuilder::build()` and `FormRequestBuilder::build()` send a `GET`, `HEAD` or `DELETE` with empty data without a body and without `Content-Type` (a `Content-Type` in the `AuthContext` is dropped as well). The JSON builder encoded `[]` as `{}` for every method, so every retrieve carried a `{}` body with `Content-Type: application/json`; RFC 9110 gives a body on these methods no defined semantics, and a spec-validating mock of PayPal's API (Prism on the official OpenAPI) answered 415 "No supported content types, but request included a non-empty body". `POST`, `PUT` and `PATCH` with empty data keep `{}` — an empty JSON object is meaningful there — and non-empty data is sent as before whatever the method. Method names are compared case-sensitively (RFC 9110 §9.1). `buildRawJson()` is unchanged.
