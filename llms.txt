@@ -23,9 +23,13 @@ format and refuses, before any HTTP call, an amount it cannot represent
 (Stripe ISK/UGX are two-decimal on the wire → ×100; Stripe BHD/JOD/KWD/OMR/TND
 need a last digit 0; PayPal HUF/TWD are zero-decimal → must be divisible by
 100). A zero amount is accepted by the core; the provider refuses it.
-`PaymentAttempt::$amount` is the created/authorized amount — there is no
-captured-amount field, so after a partial capture it does not prove what was
-collected. `idempotencyKey` is optional everywhere and never generated: a
+`PaymentAttempt::$amount` is the created/authorized amount and a capture does
+not change it; `PaymentAttempt::$capturedAmount` (`?Money`, last constructor
+argument) is the total taken so far — `null` not reported, zero before a
+capture, less than `amount` after a partial capture, may exceed it on
+overcapture; same currency as `amount` or `\InvalidArgumentException`.
+Reconcile collected money against `capturedAmount`. Adapters map Stripe
+`amount_received`, PayPal the sum of `COMPLETED` captures (zero when none). `idempotencyKey` is optional everywhere and never generated: a
 request without one is not retry-safe. The core caps keys at 255 bytes; an
 adapter with a lower provider cap (PayPal `PayPal-Request-Id` ≤ 108) rejects a
 longer key with `\InvalidArgumentException` before the HTTP call. A mapper
@@ -54,7 +58,7 @@ $method = new PaymentMethodReference(id: 'pm_1', kind: 'card');
 ```
 
 - Enums: `PaymentState` (Pending, RequiresPaymentMethod, RequiresAction, RequiresCapture, Processing, Succeeded, Failed, Canceled; `canTransitionTo(self): bool` advisory, terminal states return false). `Succeeded`/`Failed`/`Canceled` are terminal, so a recoverable provider status must never map to them — Stripe's `requires_payment_method` maps to `RequiresPaymentMethod` because the same intent can still reach `succeeded`, `RefundState` (Pending, Succeeded, Failed, Canceled), `CaptureMethod`/`ConfirmationMethod` (Automatic, Manual).
-- `PaymentAttempt(operationId, provider, payment, amount, state, rawStatus, createdAt, updatedAt, requestInfo, ?failure, ?nextAction)`: one provider execution; reference provider must match, `updatedAt >= createdAt`.
+- `PaymentAttempt(operationId, provider, payment, amount, state, rawStatus, createdAt, updatedAt, requestInfo, ?failure, ?nextAction, ?capturedAmount)`: one provider execution; reference provider must match, `updatedAt >= createdAt`, `capturedAmount` currency must equal `amount` currency.
 - `RefundAttempt(operationId, provider, refund, payment, requestedAmount, ?actualAmount, state, rawStatus, createdAt, updatedAt, requestInfo, ?failure)`.
 - `PaymentIntent(id, amount, createdAt, attempts)`: application aggregate; attempt currencies must match intent currency.
 - `PaymentFailure(code, ?message, retryable = false, details = [])`: sanitized, scalar details only.

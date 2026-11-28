@@ -166,13 +166,31 @@ the core cannot know a provider's minimum charge. The provider refuses it, and
 the adapter raises that refusal as a `PaymentException`. If a clearer error
 matters, validate the order total before creating a payment.
 
-**`PaymentAttempt::$amount` is the amount the payment was created for**, as the
-provider reports it; for an authorization that is the authorized amount. The
-contract has no captured-amount field. After a partial `capturePayment()` the
-Stripe attempt's `amount` is still the full authorization, so
-`$attempt->amount->equals($order->total)` does not prove the full total was
-collected. If you capture partially, reconcile against your own capture
-records. A captured-amount field is an open 0.x design question.
+**Two amounts: created and captured.** `PaymentAttempt::$amount` is the amount
+the payment was created for, as the provider reports it; for an authorization
+that is the authorized amount, and a capture does not change it.
+`PaymentAttempt::$capturedAmount` is the total the provider has taken so far:
+
+| `capturedAmount` | Meaning |
+|---|---|
+| `null` | the response does not say (the adapter has nothing to map) |
+| zero | nothing captured yet — an authorization in `RequiresCapture`, an unpaid payment |
+| equal to `amount` | an automatic or full capture succeeded |
+| less than `amount` | a partial capture; the rest of the authorization is released or still capturable, per provider |
+
+Reconcile what was collected against `capturedAmount`, not `amount`: after a
+partial capture `$attempt->amount->equals($order->total)` is still true. The
+attempt refuses a `capturedAmount` in another currency; it does not cap it at
+`amount`, because a provider with overcapture can take more and is
+authoritative. Adapters map it from the response:
+
+| Provider | `amount` | `capturedAmount` |
+|---|---|---|
+| Stripe PaymentIntent | `amount` | `amount_received` (`amount_capturable` is what is still capturable, not captured) |
+| PayPal order | `purchase_units[0].amount` | sum of `purchase_units[0].payments.captures[].amount` with status `COMPLETED`; zero when there are none; on a capture response, the captured amount it returns |
+
+An adapter that cannot read the captured amount from a response leaves it
+`null` rather than guessing from the state.
 
 **Idempotency keys belong to the caller.** `idempotencyKey` is optional on
 every request and the core never generates one. The adapters of this family

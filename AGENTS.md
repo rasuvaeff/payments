@@ -76,6 +76,10 @@ make release-check
   format and refuses an amount it cannot represent before any HTTP call. Do not
   document "provider units" anywhere — two adapters of one stack would then
   charge different amounts for the same `Money`.
+- **Two amounts on an attempt.** `amount` is created/authorized and never
+  rewritten by a capture; `capturedAmount` is the provider's captured total
+  (`null` = not reported). Do not cap `capturedAmount` at `amount` (Stripe
+  overcapture) and do not derive it from `state` in the core.
 - **Idempotency-key caps live in adapters.** The core cap (255 bytes) is the
   widest provider's; lowering it is a break for callers of other adapters. An
   adapter with a lower provider cap validates before the HTTP call.
