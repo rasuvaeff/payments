@@ -374,7 +374,13 @@ stack):
 ## Security
 
 `AuthContext` is an in-memory handoff, not a serializable credentials DTO.
-Credentials must never be placed in URLs or logs. Error decoding retains only
+`serialize()` throws `\LogicException`, `var_dump()`/`print_r()` show the header
+names with `[REDACTED]` values, and the credential parameters of `bearer()`,
+`basic()` and `fromHeaders()` are `#[\SensitiveParameter]`, so a factory that
+throws does not put the secret into the stack trace. `var_export()` and an
+`(array)` cast read the private property directly; do not use them on it.
+`basic()` rejects a username containing `:` (RFC 7617 splits the pair at the
+first colon). Credentials must never be placed in URLs or logs. Error decoding retains only
 the provider code/type/parameter plus allow-listed request and retry metadata;
 raw response headers and arbitrary payload values are discarded, and provider
 text is capped at 1024 bytes before it travels on inside an exception message.
