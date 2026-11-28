@@ -77,7 +77,7 @@ final class ScriptedWebhookAdapter implements WebhookValidatorInterface, Webhook
     {
         [$id] = explode('|', $input->rawBody, 2);
 
-        if ($this->mode === 'lease lost' && $this->whileMapping !== null) {
+        if ($this->mode === 'lease lost' && $this->whileMapping instanceof \Closure) {
             ($this->whileMapping)($id);
         }
 
