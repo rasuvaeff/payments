@@ -10,6 +10,7 @@ use Rasuvaeff\Payments\FormRequestBuilder;
 use Rasuvaeff\Payments\JsonRequestBuilder;
 use Testo\Assert;
 use Testo\Codecov\Covers;
+use Testo\Data\DataProvider;
 use Testo\Expect;
 use Testo\Test;
 
@@ -138,4 +139,112 @@ final class RequestBuilderTest
         );
     }
 
+    /**
+     * RFC 9110 gives a GET, HEAD or DELETE body no defined semantics, and a
+     * spec-validating server (Prism on PayPal's OpenAPI) answers 415 to a GET
+     * carrying `{}` with `Content-Type: application/json`. With nothing to send
+     * such a request has no body and no media type — also not one smuggled in
+     * through the authentication context.
+     */
+    #[DataProvider('bodylessMethodProvider')]
+    public function sendsNoBodyAndNoMediaTypeForAnEmptyBodylessRequest(string $method): void
+    {
+        $factory = new Psr17Factory();
+        $auth = AuthContext::fromHeaders(['Content-Type' => 'text/plain', 'X-Key' => 'secret']);
+
+        $json = (new JsonRequestBuilder($factory, $factory))->build(
+            method: $method,
+            uri: 'https://api.example.test/payments/pay_1',
+            data: [],
+            auth: $auth,
+        );
+        $form = (new FormRequestBuilder($factory, $factory))->build(
+            method: $method,
+            uri: 'https://api.example.test/payments/pay_1',
+            data: [],
+            auth: $auth,
+        );
+
+        Assert::same($json->getMethod(), $method);
+        Assert::same((string) $json->getBody(), '');
+        Assert::false($json->hasHeader('Content-Type'));
+        Assert::same($json->getHeaderLine('X-Key'), 'secret');
+        Assert::same($form->getMethod(), $method);
+        Assert::same((string) $form->getBody(), '');
+        Assert::false($form->hasHeader('Content-Type'));
+        Assert::same($form->getHeaderLine('X-Key'), 'secret');
+    }
+
+    public static function bodylessMethodProvider(): iterable
+    {
+        yield 'GET' => ['GET'];
+        yield 'HEAD' => ['HEAD'];
+        yield 'DELETE' => ['DELETE'];
+    }
+
+    /**
+     * An empty JSON object is a meaningful body for a method that carries
+     * one, and method names are case-sensitive (RFC 9110 §9.1): `get` is
+     * not GET.
+     */
+    #[DataProvider('bodyMethodProvider')]
+    public function keepsTheEmptyBodyOfAMethodThatCarriesOne(string $method, string $jsonBody): void
+    {
+        $factory = new Psr17Factory();
+        $auth = AuthContext::bearer('token');
+
+        $json = (new JsonRequestBuilder($factory, $factory))->build(
+            method: $method,
+            uri: 'https://api.example.test/payments/pay_1',
+            data: [],
+            auth: $auth,
+        );
+        $form = (new FormRequestBuilder($factory, $factory))->build(
+            method: $method,
+            uri: 'https://api.example.test/payments/pay_1',
+            data: [],
+            auth: $auth,
+        );
+
+        Assert::same((string) $json->getBody(), $jsonBody);
+        Assert::same($json->getHeaderLine('Content-Type'), 'application/json');
+        Assert::same((string) $form->getBody(), '');
+        Assert::same($form->getHeaderLine('Content-Type'), 'application/x-www-form-urlencoded');
+    }
+
+    public static function bodyMethodProvider(): iterable
+    {
+        yield 'POST' => ['POST', '{}'];
+        yield 'PUT' => ['PUT', '{}'];
+        yield 'PATCH' => ['PATCH', '{}'];
+        yield 'lower-case get is another method' => ['get', '{}'];
+    }
+
+    /**
+     * Only an empty request goes bodyless: data given to a GET is still sent
+     * the way it always was.
+     */
+    public function keepsTheBodyOfABodylessMethodGivenData(): void
+    {
+        $factory = new Psr17Factory();
+        $auth = AuthContext::bearer('token');
+
+        $json = (new JsonRequestBuilder($factory, $factory))->build(
+            method: 'GET',
+            uri: 'https://api.example.test/payments',
+            data: ['limit' => 3],
+            auth: $auth,
+        );
+        $form = (new FormRequestBuilder($factory, $factory))->build(
+            method: 'DELETE',
+            uri: 'https://api.example.test/payments',
+            data: ['limit' => 3],
+            auth: $auth,
+        );
+
+        Assert::same((string) $json->getBody(), '{"limit":3}');
+        Assert::same($json->getHeaderLine('Content-Type'), 'application/json');
+        Assert::same((string) $form->getBody(), 'limit=3');
+        Assert::same($form->getHeaderLine('Content-Type'), 'application/x-www-form-urlencoded');
+    }
 }

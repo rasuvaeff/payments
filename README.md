@@ -303,7 +303,12 @@ $payload = (new JsonResponseDecoder())->decode($response);
 
 `Psr18Transport` only delegates to the injected client. Retry and timeout
 policies remain application decorators. `FormRequestBuilder` encodes
-`application/x-www-form-urlencoded` bodies from scalar-only data.
+`application/x-www-form-urlencoded` bodies from scalar-only data. Both
+builders send a `GET`, `HEAD` or `DELETE` with empty data without a body and
+without `Content-Type` (RFC 9110 gives such a body no defined semantics, and a
+spec-validating server answers `415` to `{}` on a `GET`); `POST`, `PUT` and
+`PATCH` with empty data keep `{}` (JSON) or an empty form body. Method names
+are compared case-sensitively, as RFC 9110 defines them.
 `AuthContext` (`bearer()`, `basic()`, `fromHeaders()`) is an in-memory header
 handoff. `JsonResponseDecoder` maps HTTP and provider error payloads to typed
 `PaymentException` subclasses and never logs credentials or raw headers:

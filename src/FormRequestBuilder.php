@@ -37,8 +37,26 @@ final readonly class FormRequestBuilder implements RequestBuilderInterface
             $request = $request->withHeader($name, $value);
         }
 
+        // A GET, HEAD or DELETE with nothing to send has no body, so no media
+        // type either (RFC 9110 gives such a body no defined semantics).
+        if ($data === [] && $this->hasNoBodyByConvention(method: $method)) {
+            return $request->withoutHeader('Content-Type');
+        }
+
         // The media type is the builder's, not the caller's: an authentication
         // context carrying Content-Type must not decide how the body is read.
         return $request->withHeader('Content-Type', 'application/x-www-form-urlencoded');
+    }
+
+    /**
+     * RFC 9110 §9.3.1, §9.3.2, §9.3.5: a GET, HEAD or DELETE body has no
+     * defined semantics. Method names are case-sensitive (§9.1).
+     */
+    private function hasNoBodyByConvention(string $method): bool
+    {
+        return match ($method) {
+            'GET', 'HEAD', 'DELETE' => true,
+            default => false,
+        };
     }
 }

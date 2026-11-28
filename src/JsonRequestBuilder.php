@@ -24,6 +24,15 @@ final readonly class JsonRequestBuilder implements RawJsonRequestBuilderInterfac
     #[\Override]
     public function build(string $method, string $uri, array $data, AuthContext $auth): RequestInterface
     {
+        if ($data === [] && $this->hasNoBodyByConvention(method: $method)) {
+            $request = $this->requestFactory->createRequest($method, $uri);
+            foreach ($auth->headers() as $name => $value) {
+                $request = $request->withHeader($name, $value);
+            }
+
+            return $request->withoutHeader('Content-Type');
+        }
+
         $encoded = json_encode($data === [] ? new \stdClass() : $data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
 
         return $this->buildRawJson($method, $uri, $encoded, $auth);
@@ -40,6 +49,18 @@ final readonly class JsonRequestBuilder implements RawJsonRequestBuilderInterfac
         $request = $request->withBody($this->streamFactory->createStream($body));
 
         return $this->withHeaders($request, $auth, 'application/json');
+    }
+
+    /**
+     * RFC 9110 §9.3.1, §9.3.2, §9.3.5: a GET, HEAD or DELETE body has no
+     * defined semantics. Method names are case-sensitive (§9.1).
+     */
+    private function hasNoBodyByConvention(string $method): bool
+    {
+        return match ($method) {
+            'GET', 'HEAD', 'DELETE' => true,
+            default => false,
+        };
     }
 
     private function withHeaders(RequestInterface $request, AuthContext $auth, string $contentType): RequestInterface
