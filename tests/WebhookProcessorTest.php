@@ -568,7 +568,8 @@ final class WebhookProcessorTest
      * of the scripted modes — and of another worker holding and dropping a
      * claim keeps the delivery guarantee: an event is queued at most once,
      * a terminal verdict is final, a failure leaves the event redeliverable
-     * and a held claim is never finalised by the processor.
+     * and a held claim is never finalised by the processor — not even by
+     * the stale token of a delivery whose lease ran out mid-processing.
      */
     #[Property(runs: 200)]
     public function claimLifecycleKeepsTheDeliveryGuarantee(RuleSequence $sequence): void
@@ -579,9 +580,12 @@ final class WebhookProcessorTest
         });
         \assert($machine instanceof WebhookLifecycleMachine);
 
-        // About half of each share measured over repeated 200-run samples
-        // (2026-11-28): ok 22%, replayed 38-42%, released 32-42%, held 31%.
-        foreach (['ok' => 10, 'replayed' => 20, 'released' => 15, 'held elsewhere' => 15, 'invalid' => 18, 'unknown' => 10, 'unsupported' => 10, 'malformed' => 10] as $label => $minimum) {
+        // About half of the lowest share measured over repeated 200-run
+        // samples with ten modes (2026-11-28): ok 17-19%, replayed 44-47%,
+        // released 26-34%, held 28-38%, invalid 28-29%, unknown 15-21%,
+        // unsupported 21-23%, malformed 15-25%, long reason 15-20%, blank
+        // reason 15%, lease lost 18-21%.
+        foreach (['ok' => 8, 'replayed' => 20, 'released' => 12, 'held elsewhere' => 13, 'invalid' => 14, 'unknown' => 7, 'unsupported' => 10, 'malformed' => 7, 'long reason' => 7, 'blank reason' => 7, 'lease lost' => 9] as $label => $minimum) {
             Classify::cover(isset($machine->seen[$label]), $label, $minimum);
         }
     }

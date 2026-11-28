@@ -28,10 +28,18 @@ use Testo\Assert;
  *
  * The model is the delivery guarantee, not the processor's code: an event
  * reaches the queue at most once; a terminal verdict (processed, unknown,
- * unsupported, rejected) completes the claim and every later delivery is a
- * replay; a failure releases it so the next delivery runs again; a bad
- * signature never touches the store; a delivery while another worker holds
- * the claim is a replay and finalises nothing.
+ * unsupported, rejected — whatever the length of the mapper's message)
+ * completes the claim and every later delivery is a replay; a failure
+ * releases it so the next delivery runs again; a bad signature never touches
+ * the store; a delivery while another worker holds the claim is a replay and
+ * finalises nothing.
+ *
+ * A lease that runs out while the processor is mapping (`lease lost`) lets
+ * another worker claim the event. The processor's token is then stale: its
+ * `complete()` must leave the new owner's claim exactly as it is, neither
+ * completing nor deleting it. The event was already queued by then, so it
+ * may be queued once more per lost lease — the at-least-once fallback a
+ * lease shorter than processing buys.
  */
 final class WebhookLifecycleMachine
 {
@@ -48,6 +56,9 @@ final class WebhookLifecycleMachine
     /** @var array<string, WebhookClaimToken> */
     private array $held = [];
 
+    /** @var array<string, int> */
+    private array $leasesLost = [];
+
     public function __construct()
     {
         $this->adapter = new ScriptedWebhookAdapter();
@@ -60,6 +71,14 @@ final class WebhookLifecycleMachine
             eventStore: $this->store,
             eventAcceptance: new QueuedWebhookEventAcceptance(queue: $this->adapter),
         );
+        // Another worker claims the event the moment the lease runs out.
+        $this->adapter->whileMapping = function (string $id): void {
+            $this->store->expire($id);
+            $token = $this->store->claim(ScriptedWebhookAdapter::scriptedProvider(), $id);
+            Assert::instanceOf($token, WebhookClaimToken::class);
+            $this->held[$id] = $token;
+            $this->leasesLost[$id] = ($this->leasesLost[$id] ?? 0) + 1;
+        };
     }
 
     /** @return array<string, ArbitraryInterface> */
@@ -119,8 +138,26 @@ final class WebhookLifecycleMachine
         }
 
         $result = $deliver();
-        $this->completed[$id] = true;
         $this->seen[$mode] = true;
+
+        if ($mode === 'lease lost') {
+            // The stale token finalised nothing: the event stays claimed by
+            // the worker that took it over.
+            Assert::instanceOf($result, ProcessedWebhook::class);
+            Assert::same($this->adapter->queued, [...$queuedBefore, $id]);
+
+            return;
+        }
+
+        $this->completed[$id] = true;
+
+        if ($result instanceof RejectedWebhookEvent) {
+            Assert::same($result->reason, match ($mode) {
+                'long reason' => str_repeat('x', 1_024),
+                'blank reason' => 'Webhook payload cannot be mapped',
+                default => 'Payload cannot be mapped',
+            });
+        }
 
         Assert::instanceOf($result, match ($mode) {
             'ok' => ProcessedWebhook::class,
@@ -169,16 +206,26 @@ final class WebhookLifecycleMachine
     }
 
     #[Invariant]
-    public function eachEventIsQueuedAtMostOnce(): void
+    public function eachEventIsQueuedAtMostOncePerLease(): void
     {
-        Assert::same(array_values(array_unique($this->adapter->queued)), $this->adapter->queued);
+        foreach (array_count_values($this->adapter->queued) as $id => $times) {
+            Assert::true($times <= 1 + ($this->leasesLost[$id] ?? 0));
+        }
     }
 
+    /**
+     * Compared token by token: a stale finaliser that deleted the live claim
+     * and a worker that claimed it again would leave the same keys behind.
+     */
     #[Invariant]
     public function theStoreMatchesTheModel(): void
     {
         Assert::same(array_keys($this->store->completed), array_keys($this->completed));
         Assert::same(array_keys($this->store->claims), array_keys($this->held));
+
+        foreach ($this->held as $id => $token) {
+            Assert::true($this->store->claims[$id]->equals($token));
+        }
     }
 
     /** @return ArbitraryInterface<non-empty-string> */

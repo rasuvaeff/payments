@@ -47,6 +47,15 @@ final class InMemoryWebhookEventStore implements WebhookEventStoreInterface
         }
     }
 
+    /**
+     * The lease of the current claim ran out: the event can be claimed
+     * again, and the old token no longer owns anything.
+     */
+    public function expire(string $providerEventId): void
+    {
+        unset($this->claims[$providerEventId]);
+    }
+
     private function owns(string $providerEventId, WebhookClaimToken $token): bool
     {
         return isset($this->claims[$providerEventId]) && $this->claims[$providerEventId]->equals($token);

@@ -23,15 +23,21 @@ use Rasuvaeff\Payments\WebhookValidatorInterface;
 /**
  * A provider adapter whose every answer is scripted by the body,
  * `<event id>|<mode>`: `ok`, `invalid` (bad signature), `unknown` (no event
- * type), `unsupported`, `malformed`, `transient` (the mapper fails) or
- * `queue down` (the queue fails). The queue records what it accepted.
+ * type), `unsupported`, `malformed`, `long reason` and `blank reason` (malformed
+ * with a 2000-byte or a blank message), `transient` (the mapper fails),
+ * `queue down` (the queue fails) or `lease lost` (mapped like `ok`, but the
+ * claim's lease runs out while mapping: `$whileMapping` runs first). The
+ * queue records what it accepted.
  */
 final class ScriptedWebhookAdapter implements WebhookValidatorInterface, WebhookEventTypeExtractorInterface, WebhookEventRecognizerInterface, WebhookPayloadMapperInterface, WebhookEventQueueInterface
 {
-    public const array MODES = ['ok', 'invalid', 'unknown', 'unsupported', 'malformed', 'transient', 'queue down'];
+    public const array MODES = ['ok', 'invalid', 'unknown', 'unsupported', 'malformed', 'long reason', 'blank reason', 'transient', 'queue down', 'lease lost'];
 
     /** @var list<non-empty-string> */
     public array $queued = [];
+
+    /** @var (\Closure(string): void)|null */
+    public ?\Closure $whileMapping = null;
 
     private ?string $mode = null;
 
@@ -71,9 +77,15 @@ final class ScriptedWebhookAdapter implements WebhookValidatorInterface, Webhook
     {
         [$id] = explode('|', $input->rawBody, 2);
 
+        if ($this->mode === 'lease lost' && $this->whileMapping !== null) {
+            ($this->whileMapping)($id);
+        }
+
         return match ($this->mode) {
             'unsupported' => throw new UnsupportedWebhookEventException('Not handled'),
             'malformed' => throw new MalformedResponseException('Payload cannot be mapped'),
+            'long reason' => throw new MalformedResponseException(str_repeat('x', 2_000)),
+            'blank reason' => throw new MalformedResponseException(' '),
             'transient' => throw new \RuntimeException('Mapper unavailable'),
             default => new ObservedPaymentEvent(
                 providerEventId: $id,
