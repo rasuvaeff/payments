@@ -17,6 +17,24 @@ customer picks a method client-side. Mount the webhook route before any
 body-parsing middleware — a consumed stream reads back empty and fails every
 signature check (reported as the `empty_body` outcome).
 
+Adapter contract: `Money::$minorUnits` is the ISO 4217 minor unit (USD cents,
+JPY/ISK whole units, KWD fils); an adapter converts to its provider's wire
+format and refuses, before any HTTP call, an amount it cannot represent
+(Stripe ISK/UGX are two-decimal on the wire → ×100; Stripe BHD/JOD/KWD/OMR/TND
+need a last digit 0; PayPal HUF/TWD are zero-decimal → must be divisible by
+100). A zero amount is accepted by the core; the provider refuses it.
+`PaymentAttempt::$amount` is the created/authorized amount — there is no
+captured-amount field, so after a partial capture it does not prove what was
+collected. `idempotencyKey` is optional everywhere and never generated: a
+request without one is not retry-safe. The core caps keys at 255 bytes; an
+adapter with a lower provider cap (PayPal `PayPal-Request-Id` ≤ 108) rejects a
+longer key with `\InvalidArgumentException` before the HTTP call. A mapper
+rethrows value-object `\InvalidArgumentException` as
+`MalformedResponseException` (only that and `UnsupportedWebhookEventException`
+are terminal in `WebhookProcessor`); extractor/recognizer return `null` for an
+unreadable body instead of throwing. `RefundState` has no transition map — a
+Stripe refund can go `succeeded` → `failed`.
+
 Contracts API:
 
 ```php

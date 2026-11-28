@@ -141,6 +141,68 @@ validated as a header token: non-empty, at most 255 bytes, no control
 characters or spaces. Rejecting it at construction beats a PSR-7 error thrown
 deep inside the transport that names neither the field nor the request.
 
+#### What the contract fixes for adapters
+
+**Minor units are ISO 4217.** `Money::$minorUnits` counts the currency's ISO
+4217 minor unit: cents for USD and EUR (exponent 2), whole yen for JPY and
+whole krónur for ISK (exponent 0), fils for KWD and BHD (exponent 3). The core
+carries no exponent table; it fixes the meaning, so one `Money` is the same
+amount for every adapter of the stack. Where a provider's wire format differs,
+the adapter converts. Before any HTTP call it refuses an amount it cannot
+represent exactly, with `\InvalidArgumentException`, and it converts back when
+it maps a response. Known cases:
+
+| Provider | Currencies | Wire format | The adapter must |
+|---|---|---|---|
+| Stripe | ISK, UGX | two-decimal (`500` charges 5 ISK); ISO exponent 0 | multiply by 100 on the way out, divide on the way back |
+| Stripe | BHD, JOD, KWD, OMR, TND | three-decimal, last digit must be `0` | refuse an amount not divisible by 10 |
+| PayPal | HUF, TWD | zero-decimal value; ISO exponent 2 | refuse an amount not divisible by 100, send `minorUnits / 100` |
+
+The table lists the cases found by the 2026-11-28 review; check the provider's
+current currency list when an adapter adds a currency.
+
+**A zero amount is accepted** by `Money` and `CreatePaymentRequest`, because
+the core cannot know a provider's minimum charge. The provider refuses it, and
+the adapter raises that refusal as a `PaymentException`. If a clearer error
+matters, validate the order total before creating a payment.
+
+**`PaymentAttempt::$amount` is the amount the payment was created for**, as the
+provider reports it; for an authorization that is the authorized amount. The
+contract has no captured-amount field. After a partial `capturePayment()` the
+Stripe attempt's `amount` is still the full authorization, so
+`$attempt->amount->equals($order->total)` does not prove the full total was
+collected. If you capture partially, reconcile against your own capture
+records. A captured-amount field is an open 0.x design question.
+
+**Idempotency keys belong to the caller.** `idempotencyKey` is optional on
+every request and the core never generates one. The adapters of this family
+send no key when it is `null`. A request without a key is not retry-safe: a
+retry after a timeout can charge, capture or refund twice. Pass a key on every
+create, capture and refund that might be retried; see the cookbook section
+"OperationId vs idempotency key".
+
+The core caps a key at 255 bytes, Stripe's limit. A provider may accept less:
+PayPal's `PayPal-Request-Id` is at most 108 characters. An adapter whose
+provider has a lower cap must reject a longer key with
+`\InvalidArgumentException` before the HTTP call, and state its cap in its
+README. The core limit stays at 255, so a key valid for one adapter can be
+refused by another; if your application routes between providers, keep keys
+within the smallest cap.
+
+**Mappers convert value-object errors.** A response or webhook mapper that
+builds core value objects from provider data catches their
+`\InvalidArgumentException` (an unknown currency, an oversized id) and rethrows
+it as `MalformedResponseException`. `WebhookProcessor` treats only
+`MalformedResponseException` and `UnsupportedWebhookEventException` from
+`map()` as terminal; any other exception releases the claim and is answered
+503, so an unconverted value-object error makes the same payload redeliver
+forever. The event-type extractor and the recognizer run outside that
+handling: for a body they cannot read they return `null`, which becomes
+`UnknownWebhookEvent`, instead of throwing.
+
+**Refund states have no transition map.** A Stripe refund can move from
+`succeeded` to `failed` later. Re-fetch a refund before acting on its outcome.
+
 Capabilities are typed values in an immutable `CapabilitySet`:
 
 ```php
@@ -389,7 +451,7 @@ stack):
 | `WebhookEventQueueInterface` **or** `WebhookReconcilerInterface` | The durable boundary: a queue for `AfterValidation`, an authoritative re-fetch + persistence flow for `AfterPersistence` |
 | Intent/attempt persistence | `PaymentIntent`/`PaymentAttempt` projections; adapters only return attempts |
 | `GatewaySelectionPolicyInterface` | Business routing (or `FixedGatewaySelectionPolicy` for a single provider) |
-| Token cache for OAuth providers | E.g. PayPal — `rasuvaeff/payments-paypal` ships `PayPalCachedTokenProvider`, so only wiring remains |
+| Token cache for OAuth providers | E.g. PayPal — the `rasuvaeff/payments-paypal` adapter (not published yet) ships `PayPalCachedTokenProvider`, so only wiring remains |
 | Retry/timeout decorators | Transport stays dumb by design; retry only idempotent operations |
 
 ## Security

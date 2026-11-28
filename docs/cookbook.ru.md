@@ -4,6 +4,11 @@
 пакеты из [README.ru.md](../README.ru.md); исполняемые скрипты лежат в
 [examples/](../examples/) и в пакетах-адаптерах.
 
+> Адаптеры Stripe и PayPal (`rasuvaeff/payments-stripe`,
+> `rasuvaeff/payments-paypal`) **ещё не опубликованы**: `composer require` их
+> сегодня не установит. Рецепты ниже показывают API, с которым они готовятся, и
+> до первого релиза оно может измениться.
+
 ## Содержание
 
 1. [Подключить Stripe-шлюз](#подключить-stripe-шлюз)

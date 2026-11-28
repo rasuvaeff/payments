@@ -71,6 +71,19 @@ make release-check
   currency; arithmetic requires matching currencies, throws on overflow and on
   negative results, and `multiply()` takes an integer numerator/denominator with
   half-up rounding. Never introduce float math or float-accepting factories.
+- **`minorUnits` means ISO 4217 minor units.** The core fixes the meaning
+  and carries no exponent table; every adapter converts to its provider's wire
+  format and refuses an amount it cannot represent before any HTTP call. Do not
+  document "provider units" anywhere — two adapters of one stack would then
+  charge different amounts for the same `Money`.
+- **Idempotency-key caps live in adapters.** The core cap (255 bytes) is the
+  widest provider's; lowering it is a break for callers of other adapters. An
+  adapter with a lower provider cap validates before the HTTP call.
+- **Mappers own value-object errors.** Only `MalformedResponseException` and
+  `UnsupportedWebhookEventException` from `map()` are terminal; a mapper must
+  convert core VO `\InvalidArgumentException` into `MalformedResponseException`.
+  Treating every `\InvalidArgumentException` as terminal in the processor would
+  silently 204 a mis-wired adapter, so the conversion stays the mapper's job.
 - **`PaymentIntent` vs `PaymentAttempt`.** The intent is the application-owned
   aggregate (id, amount, attempts with matching currency); an attempt is one
   provider execution carrying `OperationId`, provider-matched references,

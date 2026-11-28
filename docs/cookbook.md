@@ -4,6 +4,11 @@ Practical recipes for the `rasuvaeff/payments` stack. All examples assume the
 packages from [README.md](../README.md); runnable scripts live in
 [examples/](../examples/) and in the adapter packages.
 
+> The Stripe and PayPal adapters (`rasuvaeff/payments-stripe`,
+> `rasuvaeff/payments-paypal`) are **not published yet**: `composer require`
+> cannot install them today. Their recipes below show the API they are being
+> built with and may change before the first release.
+
 ## Table of contents
 
 1. [Wire a Stripe gateway](#wire-a-stripe-gateway)
