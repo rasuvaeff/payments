@@ -429,7 +429,11 @@ A permanently unmappable payload is not retryable either. `WebhookProcessor`
 turns `MalformedResponseException` from a mapper into `RejectedWebhookEvent`,
 completes the claim and lets the bridge acknowledge: the same bytes would fail
 the same way forever, and providers disable an endpoint that keeps failing,
-which loses the *following*, healthy events. Record rejections for a human —
+which loses the *following*, healthy events. The same holds for
+`UnsupportedWebhookEventException` (→ `UnsupportedWebhookEvent`). The outcome's
+`reason` is the exception message capped at 1024 bytes on a character boundary;
+a blank message gets a fixed fallback, so no message text can turn the terminal
+verdict back into a retryable failure. Record rejections for a human —
 they mean the adapter and the provider disagree about the payload format.
 Queue implementations must be idempotent by provider and provider event id so
 a process failure around the durable boundary cannot duplicate business work.

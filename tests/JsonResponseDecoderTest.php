@@ -6,6 +6,7 @@ namespace Rasuvaeff\Payments\Tests;
 
 use Nyholm\Psr7\Response;
 use Rasuvaeff\Payments\ForbiddenException;
+use Rasuvaeff\Payments\Internal\Utf8Text;
 use Rasuvaeff\Payments\JsonResponseDecoder;
 use Rasuvaeff\Payments\MalformedResponseException;
 use Rasuvaeff\Payments\NotFoundException;
@@ -23,6 +24,7 @@ use Testo\Test;
 
 #[Test]
 #[Covers(JsonResponseDecoder::class)]
+#[Covers(Utf8Text::class)]
 final class JsonResponseDecoderTest
 {
     public function decodesSuccessfulObject(): void

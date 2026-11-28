@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Rasuvaeff\Payments\Tests;
 
+use Rasuvaeff\Payments\Internal\Utf8Text;
 use Rasuvaeff\Payments\InvalidWebhook;
 use Rasuvaeff\Payments\MalformedResponseException;
 use Rasuvaeff\Payments\ObservedPaymentEvent;
@@ -37,6 +38,7 @@ use Rasuvaeff\Understudy\Arg;
 use Rasuvaeff\Understudy\Understudy;
 use Testo\Assert;
 use Testo\Codecov\Covers;
+use Testo\Data\DataProvider;
 use Testo\Expect;
 use Testo\Lifecycle\BeforeTest;
 use Testo\Test;
@@ -49,6 +51,7 @@ use function Rasuvaeff\Understudy\when;
 #[Covers(QueuedWebhookEventAcceptance::class)]
 #[Covers(SynchronousWebhookEventAcceptance::class)]
 #[Covers(UnsupportedWebhookEventException::class)]
+#[Covers(Utf8Text::class)]
 final class WebhookProcessorTest
 {
     private WebhookValidatorInterface $validator;
@@ -280,6 +283,53 @@ final class WebhookProcessorTest
 
         Assert::instanceOf($result, RejectedWebhookEvent::class);
         Assert::same($result->reason, 'Webhook payload cannot be mapped');
+    }
+
+    /**
+     * The reason of a terminal outcome comes from a mapper's exception
+     * message, and a mapper may echo payload text into it. A message the
+     * outcome constructor refuses (blank, or longer than its 1024-byte cap)
+     * must not turn the terminal verdict into an exception: that releases
+     * the claim and answers 503, so the same poison payload is redelivered
+     * forever — the retry storm terminality exists to prevent.
+     */
+    #[DataProvider('unrepresentableReasonProvider')]
+    public function keepsPermanentMappingFailuresTerminalWhateverTheirMessage(
+        \Throwable $failure,
+        string $outcome,
+        string $reason,
+    ): void {
+        $this->stubPipeline();
+        when(fn() => $this->mapper->map(Arg::any(), Arg::any()))->throws($failure);
+        $result = $this->queuedProcessor()->process(input: $this->input());
+
+        Assert::instanceOf($result, $outcome);
+        Assert::true($result instanceof RejectedWebhookEvent || $result instanceof UnsupportedWebhookEvent);
+        Assert::same($result->reason, $reason);
+        verify(fn() => $this->store->complete(Arg::any(), Arg::any(), $this->token), times: 1);
+        verify(fn() => $this->store->release(Arg::any(), Arg::any(), Arg::any()), never: true);
+    }
+
+    /**
+     * @return iterable<string, array{\Throwable, class-string, string}>
+     */
+    public static function unrepresentableReasonProvider(): iterable
+    {
+        $long = str_repeat('x', 2_000);
+        $atLimit = str_repeat('a', 1_024);
+        // The 1024th byte is the first half of a two-byte "é": the cut walks
+        // back to 1023 bytes instead of leaving a broken sequence.
+        $straddling = 'x' . str_repeat('é', 1_000);
+
+        yield 'malformed, 2000 bytes' => [new MalformedResponseException($long), RejectedWebhookEvent::class, str_repeat('x', 1_024)];
+        yield 'malformed, 1025 bytes' => [new MalformedResponseException($atLimit . 'b'), RejectedWebhookEvent::class, $atLimit];
+        yield 'malformed, exactly 1024 bytes' => [new MalformedResponseException($atLimit), RejectedWebhookEvent::class, $atLimit];
+        yield 'malformed, cut inside a character' => [new MalformedResponseException($straddling), RejectedWebhookEvent::class, 'x' . str_repeat('é', 511)];
+        yield 'malformed, whitespace' => [new MalformedResponseException(" \t\n"), RejectedWebhookEvent::class, 'Webhook payload cannot be mapped'];
+        yield 'malformed, blank within the cap' => [new MalformedResponseException(str_repeat(' ', 1_024) . 'x'), RejectedWebhookEvent::class, 'Webhook payload cannot be mapped'];
+        yield 'unsupported, 2000 bytes' => [new UnsupportedWebhookEventException(str_repeat('y', 2_000)), UnsupportedWebhookEvent::class, str_repeat('y', 1_024)];
+        yield 'unsupported, whitespace' => [new UnsupportedWebhookEventException(' '), UnsupportedWebhookEvent::class, 'Webhook event is unsupported'];
+        yield 'unsupported, blank within the cap' => [new UnsupportedWebhookEventException(str_repeat(' ', 1_024) . 'y'), UnsupportedWebhookEvent::class, 'Webhook event is unsupported'];
     }
 
     /**

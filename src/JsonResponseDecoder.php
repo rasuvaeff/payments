@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Rasuvaeff\Payments;
 
 use Psr\Http\Message\ResponseInterface;
+use Rasuvaeff\Payments\Internal\Utf8Text;
 
 /**
  * Decodes JSON objects and maps status/error types without retaining headers.
@@ -102,20 +103,10 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
      * messages end up in logs and error reports. It echoes request fields back
      * and carries no documented length bound, so it is capped before being
      * carried any further.
-     *
-     * The cut is by bytes, then walked back until the result is valid UTF-8
-     * again: a byte cap can land inside a multi-byte sequence, and a broken
-     * sequence would make the log record itself unserializable.
      */
     private function truncate(string $value): string
     {
-        $capped = substr($value, 0, self::MESSAGE_MAXIMUM_LENGTH);
-
-        while (preg_match('//u', $capped) !== 1) {
-            $capped = substr($capped, 0, -1);
-        }
-
-        return $capped;
+        return Utf8Text::truncate(value: $value, maximumBytes: self::MESSAGE_MAXIMUM_LENGTH);
     }
 
     /**

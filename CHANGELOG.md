@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- **Fixed:** a mapper's `MalformedResponseException` or `UnsupportedWebhookEventException` stays terminal whatever its message. `WebhookProcessor` passed the message verbatim as the outcome `reason`, and the `RejectedWebhookEvent`/`UnsupportedWebhookEvent` constructors refuse a reason longer than 1024 bytes or blank (`" "`): such a message escaped as `InvalidArgumentException`, released the claim and was answered 503, so the same payload was redelivered forever — the retry storm the terminal outcomes exist to prevent. The reason is now capped at 1024 bytes on a UTF-8 character boundary, and a blank one gets the fixed fallback the empty message already had. The byte cap shared with `JsonResponseDecoder` moved to `Internal\Utf8Text`.
+
 ## 0.2.1 — 2026-11-22
 
 - `composer mutation` now runs Infection with `--with-uncovered`, so code the tests execute without naming it in `#[Covers]` is mutated and counted (overall MSI was 83% when measured this way, now 100% against `minMsi` 100). Added `AssertTest` (every guard in `Internal\Assert`, boundaries and exact messages), `PaymentExceptionTest`, a `Money::multiply()` round-up overflow case, a numeric webhook header name case, and unsupported confirmation/cancellation/refund cases for `PaymentGatewayRouter`. `infection.json5` gained the template's signature-default ignore regex and disabled `PublicVisibility`/`ProtectedVisibility`; the existing `addParts` ignore is kept. `Money::multiply()` and `WebhookCapability::__construct()` now list their parameters one per line (no behaviour change) so the ignore regex matches their defaults.
