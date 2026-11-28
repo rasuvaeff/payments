@@ -352,7 +352,11 @@ retry policy. One case is retryable: `providerCode` `idempotency_key_in_use`
 (Stripe answers 409) means a concurrent request with the same key is still
 running, and retrying later with the same key returns its result. Stripe
 documents that code without the error type it comes with, so the decoder
-classifies it by the code alone; a status row (429, 5xx) still wins. The refund row matches any provider code containing `refund`, which also
+classifies it by the code alone; a status row (429, 5xx) still wins. The
+retryable code is the provider's, so a retry policy keys on `providerCode` per
+provider: `idempotency_key_in_use` for Stripe, `PREVIOUS_REQUEST_IN_PROGRESS`
+for `rasuvaeff/payments-paypal` (Payments v2 answers 409 while an earlier call
+with the same `PayPal-Request-Id` is still being processed). The refund row matches any provider code containing `refund`, which also
 catches codes such as `charge_already_refunded`; an adapter that needs a finer
 split classifies by `providerCode` itself.
 

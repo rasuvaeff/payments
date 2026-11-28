@@ -11,10 +11,11 @@ namespace Rasuvaeff\Payments;
  *
  * Usually the key was reused with a request that differs from the first one:
  * a fault of the caller. Retrying with the same key fails the same way, and
- * retrying with a new key repeats the operation. The exception is
- * `providerCode` `idempotency_key_in_use`: a concurrent request with the same
- * key is still running, and retrying later with the same key returns its
- * result.
+ * retrying with a new key repeats the operation. The exception is the
+ * provider's in-flight code — `providerCode` `idempotency_key_in_use` for
+ * Stripe, `PREVIOUS_REQUEST_IN_PROGRESS` for PayPal (raised by
+ * rasuvaeff/payments-paypal): a concurrent request with the same key is still
+ * running, and retrying later with the same key returns its result.
  *
  * @api
  */
