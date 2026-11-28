@@ -17,6 +17,10 @@ use Rasuvaeff\Payments\RateLimitedException;
 use Rasuvaeff\Payments\RefundFailedException;
 use Rasuvaeff\Payments\ServerException;
 use Rasuvaeff\Payments\UnauthorizedException;
+use Rasuvaeff\PropertyTesting\ArbitraryInterface;
+use Rasuvaeff\PropertyTesting\Classify;
+use Rasuvaeff\PropertyTesting\Gen;
+use Rasuvaeff\PropertyTesting\Property;
 use Testo\Assert;
 use Testo\Codecov\Covers;
 use Testo\Data\DataProvider;
@@ -358,4 +362,137 @@ final class JsonResponseDecoderTest
         Assert::fail('Expected a payment exception');
     }
 
+    /**
+     * Whatever the bytes, the cap holds, the result stays valid UTF-8 and it
+     * is a prefix of the input — invalid input included.
+     */
+    #[Property(runs: 300)]
+    public function truncateReturnsAValidPrefixWithinTheCap(string $value, int $maximumBytes): void
+    {
+        $truncated = Utf8Text::truncate(value: $value, maximumBytes: $maximumBytes);
+
+        Classify::cover(strlen($value) > $maximumBytes, 'cut', 20);
+        Classify::when(preg_match('//u', $value) !== 1, 'invalid input');
+
+        Assert::true(strlen($truncated) <= $maximumBytes);
+        Assert::same(preg_match('//u', $truncated), 1);
+        Assert::true(str_starts_with($value, $truncated));
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    public static function truncateReturnsAValidPrefixWithinTheCapGenerators(): array
+    {
+        return [
+            'value' => Gen::frequency([[3, Gen::bytes(0, 80)], [1, Gen::naughtyString()]]),
+            'maximumBytes' => Gen::intBetween(1, 64),
+        ];
+    }
+
+    /**
+     * On valid UTF-8 the cut loses at most the one character the cap split:
+     * the result is the longest whole-character prefix that fits.
+     */
+    #[Property(runs: 300)]
+    public function truncateKeepsTheLongestWholeCharacterPrefix(string $value, int $maximumBytes): void
+    {
+        $truncated = Utf8Text::truncate(value: $value, maximumBytes: $maximumBytes);
+        $fits = strlen($value) <= $maximumBytes;
+
+        Classify::cover($fits, 'fits', 10);
+        Classify::cover(!$fits, 'cut', 10);
+
+        if ($fits) {
+            Assert::same($truncated, $value);
+
+            return;
+        }
+
+        $next = mb_substr(substr($value, strlen($truncated)), 0, 1);
+
+        Assert::true(strlen($truncated) + strlen($next) > $maximumBytes);
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    public static function truncateKeepsTheLongestWholeCharacterPrefixGenerators(): array
+    {
+        return [
+            // One character of every UTF-8 width, so the cap lands inside
+            // two-, three- and four-byte sequences.
+            'value' => Gen::stringFrom("a\u{E9}\u{20AC}\u{1F600}", 0, 30),
+            'maximumBytes' => Gen::intBetween(1, 48),
+        ];
+    }
+
+    /** @return iterable<string, array{string, int}> */
+    public static function truncateKeepsTheLongestWholeCharacterPrefixExamples(): iterable
+    {
+        yield 'cap inside a two-byte character' => ["a\u{E9}", 2];
+        yield 'cap inside a three-byte character' => ["\u{20AC}\u{20AC}", 4];
+        yield 'cap inside a four-byte character' => ["\u{1F600}", 3];
+        yield 'cap on a boundary' => ["\u{E9}\u{E9}", 2];
+    }
+
+    /**
+     * Status first, body second: only a 2xx may be refused as malformed, and
+     * an error status keeps its class whatever the body is.
+     *
+     * @param int<200, 599> $status
+     */
+    #[Property(runs: 400)]
+    public function classifiesByStatusWhateverTheBody(int $status, string $body): void
+    {
+        $success = $status >= 200 && $status <= 299;
+        Classify::cover($success, '2xx', 10);
+        Classify::cover($status >= 400 && $status <= 499, '4xx', 10);
+        Classify::cover($status >= 500, '5xx', 10);
+        Classify::label($body === '' ? 'empty body' : substr($body, 0, 1));
+
+        $isObject = str_starts_with($body, '{');
+        $expected = match (true) {
+            $success => $isObject ? null : MalformedResponseException::class,
+            $status === 401 => UnauthorizedException::class,
+            $status === 403 => ForbiddenException::class,
+            $status === 404 => NotFoundException::class,
+            $status === 429 => RateLimitedException::class,
+            $status >= 500 => ServerException::class,
+            default => PaymentException::class,
+        };
+
+        try {
+            $decoded = (new JsonResponseDecoder())->decode(new Response(status: $status, body: $body));
+        } catch (PaymentException $exception) {
+            Assert::true($expected !== null);
+            Assert::true($exception instanceof $expected);
+
+            if ($expected === PaymentException::class) {
+                Assert::false($exception instanceof MalformedResponseException);
+                Assert::false($exception instanceof ServerException);
+                Assert::false($exception instanceof RateLimitedException);
+            }
+
+            return;
+        }
+
+        Assert::null($expected);
+        Assert::true(is_array($decoded));
+    }
+
+    /** @return array<string, ArbitraryInterface> */
+    public static function classifiesByStatusWhateverTheBodyGenerators(): array
+    {
+        return [
+            'status' => Gen::intBetween(200, 599),
+            'body' => Gen::elements([
+                '',
+                '<html><body>502 Bad Gateway</body></html>',
+                'null',
+                '[]',
+                '"text"',
+                '{}',
+                '{"error":{"type":"card_error","message":"Declined"}}',
+                '{"error":{"type":"idempotency_error"}}',
+                '{"id":"pay_1"}',
+            ]),
+        ];
+    }
 }
