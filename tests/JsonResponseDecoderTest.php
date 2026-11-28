@@ -122,6 +122,63 @@ final class JsonResponseDecoderTest
         yield 'generic client error' => [400, '{"error":{"type":"other"}}', PaymentException::class];
     }
 
+    /**
+     * The status decides before the body is read. A load balancer, CDN or
+     * WAF answers an outage with an HTML or empty body; reading that as a
+     * malformed provider payload would turn a retryable 5xx/429 into an error
+     * the application treats as permanent — and on a 5xx the outcome of the
+     * charge is unknown, so giving up and charging again with a new key is a
+     * double charge.
+     */
+    #[DataProvider('unparseableErrorBodyProvider')]
+    public function classifiesAnUnparseableErrorBodyByStatus(int $status, string $body, string $expected): void
+    {
+        try {
+            (new JsonResponseDecoder())->decode(new Response(status: $status, body: $body));
+        } catch (PaymentException $exception) {
+            Assert::same($exception::class, $expected);
+            Assert::same($exception->getMessage(), 'Payment provider request failed');
+            Assert::null($exception->providerCode);
+            Assert::same($exception->details, []);
+
+            return;
+        }
+
+        Assert::fail('Expected a payment exception');
+    }
+
+    /**
+     * @return iterable<string, array{int, string, class-string<PaymentException>}>
+     */
+    public static function unparseableErrorBodyProvider(): iterable
+    {
+        $statuses = [
+            401 => UnauthorizedException::class,
+            403 => ForbiddenException::class,
+            404 => NotFoundException::class,
+            429 => RateLimitedException::class,
+            500 => ServerException::class,
+            502 => ServerException::class,
+            503 => ServerException::class,
+            400 => PaymentException::class,
+            402 => PaymentException::class,
+            300 => PaymentException::class,
+            199 => PaymentException::class,
+        ];
+        $bodies = [
+            'empty' => '',
+            'HTML' => '<html><body>503 Service Unavailable</body></html>',
+            'JSON list' => '[]',
+            'JSON scalar' => 'true',
+        ];
+
+        foreach ($statuses as $status => $class) {
+            foreach ($bodies as $name => $body) {
+                yield $status . ', ' . $name . ' body' => [$status, $body, $class];
+            }
+        }
+    }
+
     #[DataProvider('malformedProvider')]
     public function rejectsMalformedPayload(string $body, string $message): void
     {

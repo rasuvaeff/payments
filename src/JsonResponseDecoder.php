@@ -23,11 +23,37 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
     private const int HTTP_SERVER_ERROR_MINIMUM = 500;
     private const int MESSAGE_MAXIMUM_LENGTH = 1_024;
 
+    /**
+     * The status decides before the body is read. Only a 2xx answer must be a
+     * JSON object; an error answer whose body is not one — the HTML or empty
+     * page a load balancer, CDN or WAF serves during an outage — is still
+     * classified by its status, so a 5xx stays a retryable `ServerException`
+     * rather than a `MalformedResponseException`.
+     */
     #[\Override]
     public function decode(ResponseInterface $response): array
     {
+        $status = $response->getStatusCode();
         $body = $response->getBody()->getContents();
 
+        if ($status >= self::HTTP_SUCCESS_MINIMUM && $status <= self::HTTP_SUCCESS_MAXIMUM) {
+            return $this->object(body: $body);
+        }
+
+        try {
+            $payload = $this->object(body: $body);
+        } catch (MalformedResponseException) {
+            $payload = [];
+        }
+
+        throw $this->exceptionFor($status, $payload);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function object(string $body): array
+    {
         try {
             $decoded = json_decode($body, associative: false, depth: 512, flags: JSON_THROW_ON_ERROR);
         } catch (\JsonException $exception) {
@@ -41,11 +67,7 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
         /** @var array<string, mixed> $decoded JSON object property names are strings. */
         $decoded = get_object_vars($decoded);
 
-        if ($response->getStatusCode() >= self::HTTP_SUCCESS_MINIMUM && $response->getStatusCode() <= self::HTTP_SUCCESS_MAXIMUM) {
-            return $decoded;
-        }
-
-        throw $this->exceptionFor($response->getStatusCode(), $decoded);
+        return $decoded;
     }
 
     /**

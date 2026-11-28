@@ -217,8 +217,15 @@ $payload = (new JsonResponseDecoder())->decode($response);
 | Тип `refund_error` / refund-код | `RefundFailedException` |
 | Тип `card_error` / `decline` | `ProviderDeclinedException` |
 | Прочие не-2xx | `PaymentException` |
-| Не JSON-объект | `MalformedResponseException` |
+| Тело 2xx — не JSON-объект | `MalformedResponseException` |
 | Ошибка PSR-18 | `TransportException` |
+
+Статус решает раньше, чем читается тело. Ответ-ошибка, тело которого не
+JSON-объект (HTML или пустая страница балансировщика, CDN или WAF во время
+сбоя), всё равно бросает исключение своей строки по статусу — с сообщением
+`Payment provider request failed` и без провайдерских метаданных. Поэтому 5xx
+остаётся retryable `ServerException`, а `MalformedResponseException` значит
+только то, что не удалось прочитать успешный ответ.
 
 `PaymentException` предоставляет санитизированные `providerCode`,
 `providerType`, `providerParameter` и скалярный `details` по allow-list.

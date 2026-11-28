@@ -214,8 +214,15 @@ handoff. `JsonResponseDecoder` maps HTTP and provider error payloads to typed
 | `refund_error` type / refund code | `RefundFailedException` |
 | `card_error` / `decline` type | `ProviderDeclinedException` |
 | Other non-2xx | `PaymentException` |
-| Not a JSON object | `MalformedResponseException` |
+| 2xx body that is not a JSON object | `MalformedResponseException` |
 | PSR-18 failure | `TransportException` |
+
+The status decides before the body is read. An error answer whose body is not a
+JSON object — the HTML or empty page a load balancer, CDN or WAF serves during
+an outage — still raises the exception of its status row, with the message
+`Payment provider request failed` and no provider metadata. So a 5xx stays a
+retryable `ServerException`; `MalformedResponseException` only means a
+successful answer could not be read.
 
 `PaymentException` exposes sanitized `providerCode`, `providerType`,
 `providerParameter` and allow-listed scalar `details`.

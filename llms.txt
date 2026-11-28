@@ -94,7 +94,7 @@ $payload = (new JsonResponseDecoder())->decode((new Psr18Transport($client))->se
 
 - `AuthContext::bearer($token)` / `::basic($user, $pass)` / `::fromHeaders($map)` — in-memory only.
 - `FormRequestBuilder` encodes scalar-only form bodies.
-- `JsonResponseDecoder` maps: 401 `UnauthorizedException`, 403 `ForbiddenException`, 404 `NotFoundException`, 429 `RateLimitedException`, 5xx `ServerException`, refund errors `RefundFailedException`, card/decline `ProviderDeclinedException`, other non-2xx `PaymentException`, non-object JSON `MalformedResponseException`. PSR-18 failures become `TransportException`. `PaymentException` carries `providerCode`, `providerType`, `providerParameter`, scalar `details`.
+- `JsonResponseDecoder` maps: 401 `UnauthorizedException`, 403 `ForbiddenException`, 404 `NotFoundException`, 429 `RateLimitedException`, 5xx `ServerException`, refund errors `RefundFailedException`, card/decline `ProviderDeclinedException`, other non-2xx `PaymentException`; a 2xx body that is not a JSON object `MalformedResponseException`. The status is classified before the body is read: an error answer with an HTML/empty/non-object body (LB, CDN, WAF outage pages) still raises its status exception, message `Payment provider request failed`, no provider metadata — a 5xx stays a retryable `ServerException`. PSR-18 failures become `TransportException`. `PaymentException` carries `providerCode`, `providerType`, `providerParameter`, scalar `details`.
 
 Webhook API:
 
