@@ -195,7 +195,7 @@ authoritative. Adapters map it from the response:
 | Provider | `amount` | `capturedAmount` |
 |---|---|---|
 | Stripe PaymentIntent | `amount` | `amount_received`, which a refund does not reduce (`amount_capturable` is what is still capturable, not captured) |
-| PayPal order | `purchase_units[0].amount` | sum of `purchase_units[0].payments.captures[].amount` with status `COMPLETED`, `PARTIALLY_REFUNDED` or `REFUNDED`, at the captured amount (refunds are not subtracted); a `PENDING`, `DECLINED`, `DENIED` or `FAILED` capture counts zero; zero when there are none |
+| PayPal order | `purchase_units[0].amount` | sum of `purchase_units[0].payments.captures[].amount` with status `COMPLETED`, `PARTIALLY_REFUNDED` or `REFUNDED`, at the captured amount (refunds are not subtracted); a `PENDING`, `DECLINED`, `DENIED` or `FAILED` capture counts zero; zero for an order not captured yet; `null` for a `COMPLETED` order whose response carries no capture, or a capture in an undocumented status (the response does not say) |
 | PayPal capture | the capture's `amount` | the same rule for the one capture: `COMPLETED`, `PARTIALLY_REFUNDED`, `REFUNDED` → its amount; `PENDING`, `DECLINED`, `DENIED`, `FAILED` → zero; an undocumented status → `null` |
 
 An adapter that cannot read the captured amount from a response leaves it

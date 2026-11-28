@@ -198,7 +198,7 @@ capture `$attempt->amount->equals($order->total)` по-прежнему исти
 | Провайдер | `amount` | `capturedAmount` |
 |---|---|---|
 | Stripe PaymentIntent | `amount` | `amount_received`, который возврат не уменьшает (`amount_capturable` — что ещё можно захватить, а не захвачено) |
-| Заказ PayPal | `purchase_units[0].amount` | сумма `purchase_units[0].payments.captures[].amount` со статусом `COMPLETED`, `PARTIALLY_REFUNDED` или `REFUNDED` по захваченной сумме (возвраты не вычитаются); capture в `PENDING`, `DECLINED`, `DENIED` или `FAILED` считается нулём; ноль, если их нет |
+| Заказ PayPal | `purchase_units[0].amount` | сумма `purchase_units[0].payments.captures[].amount` со статусом `COMPLETED`, `PARTIALLY_REFUNDED` или `REFUNDED` по захваченной сумме (возвраты не вычитаются); capture в `PENDING`, `DECLINED`, `DENIED` или `FAILED` считается нулём; ноль для заказа, который ещё не захвачен; `null` для заказа в `COMPLETED`, в ответе на который нет capture, или для capture в недокументированном статусе (ответ об этом не говорит) |
 | Capture PayPal | `amount` самого capture | то же правило для одного capture: `COMPLETED`, `PARTIALLY_REFUNDED`, `REFUNDED` → его сумма; `PENDING`, `DECLINED`, `DENIED`, `FAILED` → ноль; недокументированный статус → `null` |
 
 Адаптер, который не может прочитать захваченную сумму из ответа, оставляет

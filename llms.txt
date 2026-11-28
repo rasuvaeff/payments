@@ -33,7 +33,8 @@ currency as `amount` or `\InvalidArgumentException`. Reconcile collected money
 against `capturedAmount` (`null` → do not mark paid; re-fetch or review).
 Adapters map Stripe `amount_received`, PayPal the sum of `COMPLETED`,
 `PARTIALLY_REFUNDED` and `REFUNDED` captures at their captured amount
-(`PENDING`/`DECLINED`/`DENIED`/`FAILED` → zero; zero when none; an
+(`PENDING`/`DECLINED`/`DENIED`/`FAILED` → zero; an order not captured yet →
+zero; a `COMPLETED` order whose response carries no capture, or an
 undocumented capture status → `null`). `CreatePaymentRequest::$idempotencyKey` is always a non-empty string: a
 given key is kept verbatim, otherwise the request mints a UUID v4 (36 chars)
 — build the request once outside the retry loop and resend the same object
