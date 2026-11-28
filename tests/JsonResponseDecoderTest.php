@@ -6,6 +6,7 @@ namespace Rasuvaeff\Payments\Tests;
 
 use Nyholm\Psr7\Response;
 use Rasuvaeff\Payments\ForbiddenException;
+use Rasuvaeff\Payments\IdempotencyConflictException;
 use Rasuvaeff\Payments\Internal\Utf8Text;
 use Rasuvaeff\Payments\JsonResponseDecoder;
 use Rasuvaeff\Payments\MalformedResponseException;
@@ -57,6 +58,71 @@ final class JsonResponseDecoderTest
         }
 
         Assert::fail('Expected PaymentException');
+    }
+
+    /**
+     * A card declined during a confirming create leaves a payment behind at
+     * the provider. Without its id the caller can only retry with a new key,
+     * which creates a second payment.
+     */
+    public function keepsDeclineCodeAndPaymentIdOfADecline(): void
+    {
+        try {
+            (new JsonResponseDecoder())->decode(new Response(
+                status: 402,
+                body: '{"error":{"type":"card_error","code":"card_declined","decline_code":"insufficient_funds","payment_intent":{"id":"pi_1","status":"requires_payment_method","client_secret":"pi_1_secret_x"}}}',
+            ));
+        } catch (ProviderDeclinedException $exception) {
+            Assert::same($exception->details, ['decline_code' => 'insufficient_funds', 'payment_intent' => 'pi_1']);
+
+            return;
+        }
+
+        Assert::fail('Expected ProviderDeclinedException');
+    }
+
+    public function discardsANonStringDeclineCodeAndAPaymentWithoutAStringId(): void
+    {
+        try {
+            (new JsonResponseDecoder())->decode(new Response(
+                status: 402,
+                body: '{"error":{"type":"card_error","decline_code":7,"payment_intent":{"id":5}}}',
+            ));
+        } catch (ProviderDeclinedException $exception) {
+            Assert::same($exception->details, []);
+
+            return;
+        }
+
+        Assert::fail('Expected ProviderDeclinedException');
+    }
+
+    public function discardsAPaymentIntentThatIsNotAnObject(): void
+    {
+        try {
+            (new JsonResponseDecoder())->decode(new Response(
+                status: 402,
+                body: '{"error":{"type":"card_error","payment_intent":"pi_1"}}',
+            ));
+        } catch (ProviderDeclinedException $exception) {
+            Assert::same($exception->details, []);
+
+            return;
+        }
+
+        Assert::fail('Expected ProviderDeclinedException');
+    }
+
+    /**
+     * A logging middleware that read the body leaves the stream at its end;
+     * the decoder must still see the whole document.
+     */
+    public function readsAnAlreadyConsumedBodyFromTheStart(): void
+    {
+        $response = new Response(status: 200, body: '{"id":"pay_1"}');
+        $response->getBody()->getContents();
+
+        Assert::same((new JsonResponseDecoder())->decode($response), ['id' => 'pay_1']);
     }
 
     public function discardsNonScalarDiagnosticsAndMalformedErrorShape(): void
@@ -118,6 +184,11 @@ final class JsonResponseDecoderTest
         yield 'explicit decline type' => [400, '{"error":{"type":"decline"}}', ProviderDeclinedException::class];
         yield 'refund' => [400, '{"error":{"type":"refund_error"}}', RefundFailedException::class];
         yield 'refund code' => [400, '{"error":{"code":"refund_failed"}}', RefundFailedException::class];
+        yield 'idempotency conflict' => [400, '{"error":{"type":"idempotency_error","code":"idempotency_key_in_use"}}', IdempotencyConflictException::class];
+        yield 'idempotency conflict 409' => [409, '{"error":{"type":"idempotency_error"}}', IdempotencyConflictException::class];
+        yield 'idempotency type over refund code' => [400, '{"error":{"type":"idempotency_error","code":"refund_key"}}', IdempotencyConflictException::class];
+        yield 'status beats idempotency type' => [503, '{"error":{"type":"idempotency_error"}}', ServerException::class];
+        yield 'plain 409' => [409, '{}', PaymentException::class];
         yield 'generic 402' => [402, '{}', PaymentException::class];
         yield 'generic client error' => [400, '{"error":{"type":"other"}}', PaymentException::class];
     }

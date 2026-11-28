@@ -214,6 +214,7 @@ $payload = (new JsonResponseDecoder())->decode($response);
 | 404 | `NotFoundException` |
 | 429 | `RateLimitedException` |
 | 5xx | `ServerException` |
+| Тип `idempotency_error` | `IdempotencyConflictException` |
 | Тип `refund_error` / refund-код | `RefundFailedException` |
 | Тип `card_error` / `decline` | `ProviderDeclinedException` |
 | Прочие не-2xx | `PaymentException` |
@@ -228,7 +229,21 @@ JSON-объект (HTML или пустая страница балансиро�
 только то, что не удалось прочитать успешный ответ.
 
 `PaymentException` предоставляет санитизированные `providerCode`,
-`providerType`, `providerParameter` и скалярный `details` по allow-list.
+`providerType`, `providerParameter` и скалярный `details` по allow-list:
+`request_id` и `retry_after` с верхнего уровня тела, `decline_code` и
+`payment_intent` (id из `error.payment_intent`) из объекта ошибки. Карта,
+отклонённая при подтверждении во время create, оставляет платёж у провайдера, и
+`details['payment_intent']` — способ повторить попытку на нём, а не создавать
+второй. Заголовки ответа декодер не читает, поэтому если провайдер шлёт
+request id или `Retry-After` только заголовком, эти ключи пусты — читайте их из
+ответа в адаптере.
+
+`IdempotencyConflictException` значит, что ключ переиспользован с запросом,
+отличным от первого: ошибка вызывающего. Повтор с тем же ключом упадёт так же,
+повтор с новым ключом повторит операцию, поэтому ни то ни другое не политика
+ретраев. Строка про refund ловит любой провайдерский код, содержащий `refund`,
+включая коды вроде `charge_already_refunded`; адаптер, которому нужно точнее,
+классифицирует по `providerCode` сам.
 
 ### Webhooks
 
@@ -335,7 +350,7 @@ middleware, читается как пустая строка — и тогда 
 | Транспорт | `TransportInterface`, `Psr18Transport`, `TransportException` |
 | Построение запросов | `RequestBuilderInterface`, `RawJsonRequestBuilderInterface`, `JsonRequestBuilder`, `FormRequestBuilder`, `AuthContext` |
 | Декодирование ответов | `ResponseDecoderInterface`, `JsonResponseDecoder`, `MalformedResponseException` |
-| Ошибки провайдера | `PaymentException`, `UnauthorizedException`, `ForbiddenException`, `NotFoundException`, `RateLimitedException`, `ProviderDeclinedException`, `RefundFailedException`, `ServerException` |
+| Ошибки провайдера | `PaymentException`, `UnauthorizedException`, `ForbiddenException`, `NotFoundException`, `RateLimitedException`, `ProviderDeclinedException`, `RefundFailedException`, `IdempotencyConflictException`, `ServerException` |
 | Webhook вход/результаты | `WebhookInput`, `WebhookValidationResult`, `ValidWebhook`, `InvalidWebhook`, `WebhookProcessingResult`, `ProcessedWebhook`, `WebhookValidationFailed`, `UnknownWebhookEvent`, `UnsupportedWebhookEvent`, `ReplayedWebhookEvent`, `WebhookAcknowledgementPolicy` |
 | Контракты webhook-адаптера | `WebhookValidatorInterface`, `WebhookEventTypeExtractorInterface`, `WebhookEventRecognizerInterface`, `WebhookPayloadMapperInterface`, `UnsupportedWebhookEventException` |
 | Контракты webhook-persistence | `WebhookEventStoreInterface`, `WebhookClaimToken`, `WebhookEventQueueInterface`, `WebhookReconcilerInterface`, `WebhookEventAcceptanceInterface` |

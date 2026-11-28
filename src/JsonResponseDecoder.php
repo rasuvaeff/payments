@@ -34,7 +34,15 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
     public function decode(ResponseInterface $response): array
     {
         $status = $response->getStatusCode();
-        $body = $response->getBody()->getContents();
+        $stream = $response->getBody();
+
+        // A logging middleware that already read the body leaves the stream
+        // at its end, and getContents() reads only what remains.
+        if ($stream->isSeekable()) {
+            $stream->rewind();
+        }
+
+        $body = $stream->getContents();
 
         if ($status >= self::HTTP_SUCCESS_MINIMUM && $status <= self::HTTP_SUCCESS_MAXIMUM) {
             return $this->object(body: $body);
@@ -92,6 +100,26 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
             }
         }
 
+        $declineCode = $this->stringValue($error, 'decline_code');
+
+        if ($declineCode !== null) {
+            $details['decline_code'] = $declineCode;
+        }
+
+        // A card declined while a create was confirming leaves the payment
+        // behind at the provider (Stripe answers 402 with the PaymentIntent).
+        // Its id is the only way to retry on that payment instead of creating
+        // a second one with a new key.
+        if (isset($error['payment_intent']) && $error['payment_intent'] instanceof \stdClass) {
+            /** @var array<string, mixed> $paymentIntent JSON object property names are strings. */
+            $paymentIntent = get_object_vars($error['payment_intent']);
+            $paymentIntentId = $this->stringValue($paymentIntent, 'id');
+
+            if ($paymentIntentId !== null) {
+                $details['payment_intent'] = $paymentIntentId;
+            }
+        }
+
         /** @var class-string<PaymentException> $exceptionClass */
         if ($status === self::HTTP_UNAUTHORIZED) {
             $exceptionClass = UnauthorizedException::class;
@@ -103,6 +131,8 @@ final readonly class JsonResponseDecoder implements ResponseDecoderInterface
             $exceptionClass = RateLimitedException::class;
         } elseif ($status >= self::HTTP_SERVER_ERROR_MINIMUM) {
             $exceptionClass = ServerException::class;
+        } elseif ($type === 'idempotency_error') {
+            $exceptionClass = IdempotencyConflictException::class;
         } elseif ($type === 'refund_error' || str_contains($code ?? '', 'refund')) {
             $exceptionClass = RefundFailedException::class;
         } elseif ($type === 'card_error' || $type === 'decline') {

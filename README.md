@@ -211,6 +211,7 @@ handoff. `JsonResponseDecoder` maps HTTP and provider error payloads to typed
 | 404 | `NotFoundException` |
 | 429 | `RateLimitedException` |
 | 5xx | `ServerException` |
+| `idempotency_error` type | `IdempotencyConflictException` |
 | `refund_error` type / refund code | `RefundFailedException` |
 | `card_error` / `decline` type | `ProviderDeclinedException` |
 | Other non-2xx | `PaymentException` |
@@ -225,7 +226,21 @@ retryable `ServerException`; `MalformedResponseException` only means a
 successful answer could not be read.
 
 `PaymentException` exposes sanitized `providerCode`, `providerType`,
-`providerParameter` and allow-listed scalar `details`.
+`providerParameter` and allow-listed scalar `details`: `request_id` and
+`retry_after` from the top level of the body, `decline_code` and
+`payment_intent` (the id of `error.payment_intent`) from the error object. A
+card declined while a create was confirming leaves the payment behind at the
+provider, and `details['payment_intent']` is how to retry on it instead of
+creating a second one. The decoder reads no response headers, so a provider
+that sends its request id or `Retry-After` only as a header leaves those keys
+empty — read them from the response in the adapter.
+
+`IdempotencyConflictException` means the key was reused with a request that
+differs from the first: a caller bug. Retrying with the same key fails the same
+way and retrying with a new key repeats the operation, so neither is a retry
+policy. The refund row matches any provider code containing `refund`, which also
+catches codes such as `charge_already_refunded`; an adapter that needs a finer
+split classifies by `providerCode` itself.
 
 ### Webhooks
 
@@ -331,7 +346,7 @@ header:
 | Transport | `TransportInterface`, `Psr18Transport`, `TransportException` |
 | Request building | `RequestBuilderInterface`, `RawJsonRequestBuilderInterface`, `JsonRequestBuilder`, `FormRequestBuilder`, `AuthContext` |
 | Response decoding | `ResponseDecoderInterface`, `JsonResponseDecoder`, `MalformedResponseException` |
-| Provider failures | `PaymentException`, `UnauthorizedException`, `ForbiddenException`, `NotFoundException`, `RateLimitedException`, `ProviderDeclinedException`, `RefundFailedException`, `ServerException` |
+| Provider failures | `PaymentException`, `UnauthorizedException`, `ForbiddenException`, `NotFoundException`, `RateLimitedException`, `ProviderDeclinedException`, `RefundFailedException`, `IdempotencyConflictException`, `ServerException` |
 | Webhook input/results | `WebhookInput`, `WebhookValidationResult`, `ValidWebhook`, `InvalidWebhook`, `WebhookProcessingResult`, `ProcessedWebhook`, `WebhookValidationFailed`, `UnknownWebhookEvent`, `UnsupportedWebhookEvent`, `RejectedWebhookEvent`, `ReplayedWebhookEvent`, `WebhookAcknowledgementPolicy` |
 | Webhook adapter contracts | `WebhookValidatorInterface`, `WebhookEventTypeExtractorInterface`, `WebhookEventRecognizerInterface`, `WebhookPayloadMapperInterface`, `UnsupportedWebhookEventException` |
 | Webhook persistence contracts | `WebhookEventStoreInterface`, `WebhookClaimToken`, `WebhookEventQueueInterface`, `WebhookReconcilerInterface`, `WebhookEventAcceptanceInterface` |
