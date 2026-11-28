@@ -100,6 +100,32 @@ final class CreatePaymentRequestTest
         Assert::same(\count($seen[20]), 16);
     }
 
+    /**
+     * Each hex digit comes from its own random bits: no two positions of
+     * the key are equal in every sample, which a key reusing one byte for
+     * two digits (or an off-by-one group boundary) would make them.
+     */
+    public function drawsEveryDigitOfTheGeneratedKeyFromItsOwnBits(): void
+    {
+        $differs = [];
+
+        for ($i = 0; $i < 256; ++$i) {
+            $digits = str_replace('-', '', $this->request()->idempotencyKey);
+
+            for ($a = 0; $a < 32; ++$a) {
+                for ($b = $a + 1; $b < 32; ++$b) {
+                    if ($digits[$a] !== $digits[$b]) {
+                        $differs[$a . '/' . $b] = true;
+                    }
+                }
+            }
+        }
+
+        // All 32 * 31 / 2 pairs: even the fixed version digit `4` and the
+        // variant digit differ from every random one in some sample.
+        Assert::same(\count($differs), 496);
+    }
+
     public function rejectsEmptyIdempotencyKey(): void
     {
         Expect::exception(\InvalidArgumentException::class);
