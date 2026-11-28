@@ -192,11 +192,26 @@ authoritative. Adapters map it from the response:
 An adapter that cannot read the captured amount from a response leaves it
 `null` rather than guessing from the state.
 
-**Idempotency keys belong to the caller.** `idempotencyKey` is optional on
-every request and the core never generates one. The adapters of this family
-send no key when it is `null`. A request without a key is not retry-safe: a
-retry after a timeout can charge, capture or refund twice. Pass a key on every
-create, capture and refund that might be retried; see the cookbook section
+**Every create carries a key.** `CreatePaymentRequest::$idempotencyKey` is a
+non-empty string. A key you pass is used verbatim; without one the request
+mints a random UUID v4 (36 characters). The effective key exists before the
+call, so it reaches the adapter (`Idempotency-Key` for Stripe,
+`PayPal-Request-Id` for PayPal) and survives the failure that matters — a
+timeout, after which there is no attempt to read anything from:
+
+```php
+$request = new CreatePaymentRequest(operationId: $op, amount: $total, paymentMethod: $pm);
+$store->rememberKey($order, $request->idempotencyKey);   // optional: survive a restart
+
+$attempt = $retry->run(fn () => $gateway->createPayment($request));   // same object, same key
+```
+
+Build the request once, outside the retry loop: a closure that calls
+`new CreatePaymentRequest(...)` mints a new key on every try, and each try is
+a new payment. To retry from another process, pass the remembered key back as
+`idempotencyKey:`. For capture, confirm, cancel and refund the key stays
+optional and is never generated; the adapters of this family send no key when
+it is `null`, and such a request is not retry-safe. See the cookbook section
 "OperationId vs idempotency key".
 
 The core caps a key at 255 bytes, Stripe's limit. A provider may accept less:

@@ -29,8 +29,12 @@ argument) is the total taken so far — `null` not reported, zero before a
 capture, less than `amount` after a partial capture, may exceed it on
 overcapture; same currency as `amount` or `\InvalidArgumentException`.
 Reconcile collected money against `capturedAmount`. Adapters map Stripe
-`amount_received`, PayPal the sum of `COMPLETED` captures (zero when none). `idempotencyKey` is optional everywhere and never generated: a
-request without one is not retry-safe. The core caps keys at 255 bytes; an
+`amount_received`, PayPal the sum of `COMPLETED` captures (zero when none). `CreatePaymentRequest::$idempotencyKey` is always a non-empty string: a
+given key is kept verbatim, otherwise the request mints a UUID v4 (36 chars)
+— build the request once outside the retry loop and resend the same object
+(or persist the key); adapters always receive it. Capture/confirm/cancel/refund
+keys stay optional and are never generated: without one a request is not
+retry-safe. The core caps keys at 255 bytes; an
 adapter with a lower provider cap (PayPal `PayPal-Request-Id` ≤ 108) rejects a
 longer key with `\InvalidArgumentException` before the HTTP call. A mapper
 rethrows value-object `\InvalidArgumentException` as
@@ -81,7 +85,7 @@ interface PaymentGatewayInterface {
 //                        ::retrieveRefund(RetrieveRefundRequest): RefundAttempt
 ```
 
-- Requests: `CreatePaymentRequest(operationId, amount, paymentMethod, ?customer, captureMethod, confirmationMethod, ?description, metadata, ?idempotencyKey)`, `CapturePaymentRequest(operationId, payment, ?amount, ?idempotencyKey)`, `CreateRefundRequest(operationId, payment, ?amount, ?reason, ?idempotencyKey)`, `PaymentOperationRequest(operationId, payment, ?idempotencyKey)` for confirm/cancel, `RetrievePaymentRequest(operationId, payment)`, `RetrieveRefundRequest(operationId, refund)`.
+- Requests: `CreatePaymentRequest(operationId, amount, ?paymentMethod, ?customer, ?captureMethod = Automatic, ?confirmationMethod = Automatic, ?description, metadata, ?idempotencyKey = generated UUID v4)` (properties `captureMethod`, `confirmationMethod`, `idempotencyKey` are never null), `CapturePaymentRequest(operationId, payment, ?amount, ?idempotencyKey)`, `CreateRefundRequest(operationId, payment, ?amount, ?reason, ?idempotencyKey)`, `PaymentOperationRequest(operationId, payment, ?idempotencyKey)` for confirm/cancel, `RetrievePaymentRequest(operationId, payment)`, `RetrieveRefundRequest(operationId, refund)`.
 - Capabilities: `CapabilitySet::of(Capability ...)` (duplicate types rejected), `->get(Class::class): ?T`, `->has(Class::class): bool`, `->all(): list<Capability>`. Shipped: `PartialRefundCapability(?maximumRefunds)`, `SandboxCapability(environment = 'sandbox')`, `ThreeDsCapability(versions)`, `WebhookCapability(signatureRequired = true)`. Implement the `Capability` marker for custom ones.
 
 Registry and router:

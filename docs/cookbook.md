@@ -319,7 +319,7 @@ disagree about the format.
 | Concept | Scope | Lifetime |
 |---|---|---|
 | `OperationId` | one logical business command | stable across retries, providers and failover attempts |
-| `idempotencyKey` | one provider-side call attempt | stable across transport retries of that exact call; new value when policy starts a new attempt |
+| `idempotencyKey` | one provider-side call attempt | stable across transport retries of that exact call; new value when policy starts a new attempt. Generated (UUID v4) for a create without one, so read it from the request when you need to persist it |
 
 The adapter forwards both; persistence and replay enforcement live in your
 application (or the future Yii3 bridge).
@@ -355,7 +355,9 @@ Core ships no retry policy on purpose. Decorate the transport (or the gateway)
 with `rasuvaeff/retry` and retry only explicitly idempotent operations:
 
 - retrievals (`retrievePayment`, `retrieveRefund`);
-- creates carrying a stable idempotency key;
+- creates, when the same `CreatePaymentRequest` object (or its remembered
+  `idempotencyKey`) is resent — every create carries a key, generated when
+  you pass none, but a request rebuilt inside the retry loop gets a new one;
 - never blind `POST`s without a key.
 
 Map transport failures to `TransportException`/`ServerException` and let the

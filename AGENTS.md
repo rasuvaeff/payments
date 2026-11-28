@@ -80,6 +80,11 @@ make release-check
   rewritten by a capture; `capturedAmount` is the provider's captured total
   (`null` = not reported). Do not cap `capturedAmount` at `amount` (Stripe
   overcapture) and do not derive it from `state` in the core.
+- **A create always carries a key.** `CreatePaymentRequest::$idempotencyKey`
+  is non-null: given verbatim or a generated UUID v4 (36 chars, under PayPal's
+  108). Do not reintroduce a nullable create key or generate keys for the
+  other requests without a design decision — a generated key is only
+  retry-safe when the same request object is resent.
 - **Idempotency-key caps live in adapters.** The core cap (255 bytes) is the
   widest provider's; lowering it is a break for callers of other adapters. An
   adapter with a lower provider cap validates before the HTTP call.
