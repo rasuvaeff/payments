@@ -10,10 +10,11 @@ use Rasuvaeff\Payments\Internal\Types;
  * Already-selected authentication headers for one provider call.
  *
  * It holds a live credential, so it keeps out of dumps and refuses
- * serialization: `var_dump()`/`print_r()` show the header names with
- * redacted values, and `serialize()` throws. `var_export()` and an `(array)`
- * cast read private properties directly and are not covered — do not use
- * them on this object.
+ * serialization: `var_dump()`/`print_r()` and Symfony VarDumper (`dump()`,
+ * `dd()`) show the header names with redacted values, and `serialize()`
+ * throws. `var_export()` and a bare `(array)` cast read the private property
+ * directly and are not covered, nor is a dumper that ignores
+ * `__debugInfo()` — do not use them on this object.
  *
  * @api
  *
@@ -89,11 +90,17 @@ final readonly class AuthContext
     }
 
     /**
-     * @return array{headers: array<string, string>}
+     * The key is the private property's mangled name (`"\0" . class . "\0"
+     * . property`), the one an `(array)` cast produces. Symfony VarDumper
+     * reads the object through that cast and overlays `__debugInfo()` on
+     * it: a matching key replaces the property, a plain `headers` key would
+     * be shown beside the unredacted one.
+     *
+     * @return array<non-empty-string, array<string, string>>
      */
     public function __debugInfo(): array
     {
-        return ['headers' => array_map(static fn(string $value): string => self::REDACTED, $this->headers)];
+        return ["\0" . self::class . "\0headers" => array_map(static fn(string $value): string => self::REDACTED, $this->headers)];
     }
 
     public function __serialize(): array

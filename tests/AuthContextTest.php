@@ -80,7 +80,24 @@ final class AuthContextTest
         $dump = print_r($context, return: true);
 
         Assert::false(str_contains($dump, $secret));
-        Assert::same($context->__debugInfo(), ['headers' => ['Authorization' => '[REDACTED]']]);
+        Assert::same($context->__debugInfo(), ["\0" . AuthContext::class . "\0headers" => ['Authorization' => '[REDACTED]']]);
+    }
+
+    /**
+     * Symfony VarDumper (`dump()`, `dd()`, the debug toolbar) reads the
+     * object through an `(array)` cast and then overlays `__debugInfo()`: a
+     * key that names the private property replaces it, any other key is
+     * added beside it. So every property the cast exposes must come back
+     * from `__debugInfo()` under its own mangled name, redacted.
+     */
+    #[DataProvider('contextProvider')]
+    public function debugInfoOverridesEveryPropertyTheCastExposes(AuthContext $context, string $secret): void
+    {
+        $cast = (array) $context;
+        $overlaid = array_replace($cast, $context->__debugInfo());
+
+        Assert::same(array_keys($context->__debugInfo()), array_keys($cast));
+        Assert::false(str_contains(serialize($overlaid), $secret));
     }
 
     #[DataProvider('contextProvider')]
