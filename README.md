@@ -354,7 +354,13 @@ to the six outcomes shipped here, so calling the concrete processor allows an
 exhaustive `instanceof` chain; calling through `WebhookProcessorInterface` means
 handling an unknown outcome.
 
-`WebhookInput::header()` requires a non-empty header name.
+`WebhookInput::header()` requires a non-empty header name. Header names given
+to `WebhookInput` must be RFC 9110 tokens (letters, digits and
+``!#$%&'*+-.^_`|~``); an all-digit name that PHP turned into an int array key
+is accepted as its string. Anything else throws `\InvalidArgumentException`,
+which `WebhookController` answers like any processing exception — 503
+`processing_failed`, logged. A PSR-7 request cannot carry such a name, so from
+the controller this only fires on a broken message implementation.
 
 ## What your application implements
 

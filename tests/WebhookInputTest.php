@@ -97,6 +97,39 @@ final class WebhookInputTest
         Assert::same($input->requestMetadata(), [$key => 'value']);
     }
 
+    /**
+     * RFC 9110 field names are tokens: `tchar` is ALPHA, DIGIT and
+     * ``!#$%&'*+-.^_`|~``. A load balancer or CDN adding such a header to
+     * every request must not turn each delivery into a 503.
+     *
+     * @param array<array-key, string> $headers
+     * @param array<string, list<string>> $expected
+     */
+    #[DataProvider('tokenHeaderNameProvider')]
+    public function acceptsEveryRfc9110TokenHeaderName(array $headers, array $expected): void
+    {
+        $input = new WebhookInput(
+            rawBody: '{}',
+            provider: new PaymentProvider(value: 'fixture'),
+            headers: $headers,
+        );
+
+        Assert::same($input->headers(), $expected);
+    }
+
+    /**
+     * @return iterable<string, array{array<array-key, string>, array<string, list<string>>}>
+     */
+    public static function tokenHeaderNameProvider(): iterable
+    {
+        yield 'dot' => [['X-Forwarded.For' => 'a'], ['x-forwarded.for' => ['a']]];
+        yield 'bang' => [['X-Trace!Id' => 'a'], ['x-trace!id' => ['a']]];
+        yield 'every tchar symbol' => [["!#$%&'*+-.^_`|~" => 'a'], ["!#$%&'*+-.^_`|~" => ['a']]];
+        // PHP turns the array key "123" into int 123; PSR-7 getHeaders() hands it over that way.
+        yield 'digits only' => [['123' => 'a'], ['123' => ['a']]];
+        yield 'int key' => [[5 => 'a'], ['5' => ['a']]];
+    }
+
     #[DataProvider('invalidInputProvider')]
     public function rejectsInvalidHeadersAndMetadata(array $headers, array $metadata): void
     {
@@ -115,7 +148,11 @@ final class WebhookInputTest
     public static function invalidInputProvider(): iterable
     {
         yield 'invalid header name' => [['bad header' => 'value'], []];
-        yield 'numeric header name' => [[5 => 'value'], []];
+        yield 'separator in header name' => [['x/value' => 'value'], []];
+        yield 'colon in header name' => [['x:value' => 'value'], []];
+        yield 'non-ascii header name' => [["x-na\u{EF}ve" => 'value'], []];
+        yield 'trailing newline in header name' => [["x-value\n" => 'value'], []];
+        yield 'empty header name' => [['' => 'value'], []];
         yield 'carriage return injection' => [['x-value' => "value\rinjected"], []];
         yield 'line feed injection' => [['x-value' => "value\ninjected"], []];
         yield 'header injection' => [['x-value' => "value\r\ninjected"], []];

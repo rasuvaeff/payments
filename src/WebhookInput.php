@@ -18,7 +18,8 @@ use Rasuvaeff\Payments\Internal\Types;
 final readonly class WebhookInput
 {
     private const string REDACTED = '[REDACTED]';
-    private const string HEADER_NAME_PATTERN = '/^[A-Za-z0-9_-]+\z/';
+    /** RFC 9110 field-name: one or more `tchar`. */
+    private const string HEADER_NAME_PATTERN = "/^[!#$%&'*+\\-.^_`|~0-9A-Za-z]+\\z/";
     private const int METADATA_KEY_MAXIMUM_LENGTH = 128;
 
     /** @var HeaderMap */
@@ -106,10 +107,10 @@ final readonly class WebhookInput
     {
         $normalized = [];
 
-        foreach (array_keys($headers) as $name) {
-            if (!is_string($name)) {
-                throw new \InvalidArgumentException('Webhook header names must be non-empty tokens');
-            }
+        foreach (array_keys($headers) as $key) {
+            // PHP stores the array key "123" as int 123, so an all-digit field
+            // name — a valid token — arrives here as an int.
+            $name = (string) $key;
 
             Assert::matches(
                 value: $name,
@@ -117,7 +118,7 @@ final readonly class WebhookInput
                 message: 'Webhook header names must be non-empty tokens',
             );
 
-            $headerName = $name;
+            $headerName = $key;
             $name = strtolower($name);
 
             if (is_string($headers[$headerName])) {
