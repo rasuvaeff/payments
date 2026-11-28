@@ -77,8 +77,9 @@ make release-check
   document "provider units" anywhere — two adapters of one stack would then
   charge different amounts for the same `Money`.
 - **Two amounts on an attempt.** `amount` is created/authorized and never
-  rewritten by a capture; `capturedAmount` is the provider's captured total
-  (`null` = not reported). Do not cap `capturedAmount` at `amount` (Stripe
+  rewritten by a capture; `capturedAmount` is the provider's gross captured
+  total (`null` = not reported, zero = not captured yet — a pending capture
+  included; refunds never reduce it). Do not cap `capturedAmount` at `amount` (Stripe
   overcapture) and do not derive it from `state` in the core.
 - **A create always carries a key.** `CreatePaymentRequest::$idempotencyKey`
   is non-null: given verbatim or a generated UUID v4 (36 chars, under PayPal's

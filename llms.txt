@@ -20,16 +20,21 @@ signature check (reported as the `empty_body` outcome).
 Adapter contract: `Money::$minorUnits` is the ISO 4217 minor unit (USD cents,
 JPY/ISK whole units, KWD fils); an adapter converts to its provider's wire
 format and refuses, before any HTTP call, an amount it cannot represent
-(Stripe ISK/UGX are two-decimal on the wire → ×100; Stripe BHD/JOD/KWD/OMR/TND
-need a last digit 0; PayPal HUF/TWD are zero-decimal → must be divisible by
-100). A zero amount is accepted by the core; the provider refuses it.
+(Stripe ISK/UGX are two-decimal on the wire → ×100; Stripe MGA is
+zero-decimal → must be divisible by 100, ÷100 out, ×100 back; Stripe
+BHD/JOD/KWD/OMR/TND need a last digit 0; PayPal HUF/TWD are zero-decimal →
+must be divisible by 100). A zero amount is accepted by the core; the provider refuses it.
 `PaymentAttempt::$amount` is the created/authorized amount and a capture does
 not change it; `PaymentAttempt::$capturedAmount` (`?Money`, last constructor
-argument) is the total taken so far — `null` not reported, zero before a
-capture, less than `amount` after a partial capture, may exceed it on
-overcapture; same currency as `amount` or `\InvalidArgumentException`.
-Reconcile collected money against `capturedAmount`. Adapters map Stripe
-`amount_received`, PayPal the sum of `COMPLETED` captures (zero when none). `CreatePaymentRequest::$idempotencyKey` is always a non-empty string: a
+argument) is the GROSS amount captured so far — `null` not reported, zero
+before a capture or while a capture is pending, less than `amount` after a
+partial capture, may exceed it on overcapture; refunds never reduce it; same
+currency as `amount` or `\InvalidArgumentException`. Reconcile collected money
+against `capturedAmount` (`null` → do not mark paid; re-fetch or review).
+Adapters map Stripe `amount_received`, PayPal the sum of `COMPLETED`,
+`PARTIALLY_REFUNDED` and `REFUNDED` captures at their captured amount
+(`PENDING`/`DECLINED`/`DENIED`/`FAILED` → zero; zero when none; an
+undocumented capture status → `null`). `CreatePaymentRequest::$idempotencyKey` is always a non-empty string: a
 given key is kept verbatim, otherwise the request mints a UUID v4 (36 chars)
 — build the request once outside the retry loop and resend the same object
 (or persist the key); adapters always receive it. Capture/confirm/cancel/refund

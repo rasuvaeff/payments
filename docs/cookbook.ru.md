@@ -220,7 +220,7 @@ $outcome = match (true) {
 Фаза 1 (синхронная): проверка подписи → атомарный `claim()` провайдерского
 event id → распознавание и маппинг → надёжная постановка в очередь →
 `complete()` захвата. Фаза 2 (реконсиляция): повторный запрос авторитетного
-состояния провайдера, сверка суммы с заказом, персистенция проекции попытки,
+состояния провайдера, сверка захваченной суммы с заказом, персистенция проекции попытки,
 затем события приложения. Пейлоад вебхука — только наблюдение; авторитетное
 состояние всегда берётся из повторного запроса.
 
@@ -230,12 +230,26 @@ $attempt = $gateway->retrievePayment(new RetrievePaymentRequest(
     payment: $event->payment,
 ));
 
-// Сверять сумму И валюту. Один `minorUnits === $order->total` примет
-// 1000 JPY за заказ на 1000 USD.
-if ($attempt->state === PaymentState::Succeeded && $attempt->amount->equals($order->total)) {
+// Сверять собранное, а не авторизованное: после частичного capture
+// `amount` — по-прежнему вся авторизация. `capturedAmount` — брутто: более
+// поздний возврат его не уменьшает, возвраты сверяются отдельно.
+$collected = $attempt->capturedAmount;
+
+if ($collected === null) {
+    // Адаптер не смог прочитать захваченную сумму. Никогда не помечать заказ
+    // оплаченным наугад: повторить запрос позже или отправить на ручную проверку.
+    $review->flag(order: $order, attempt: $attempt);
+} elseif ($attempt->state === PaymentState::Succeeded && $collected->equals($order->total)) {
+    // Сверять сумму И валюту: один `minorUnits === $order->total` примет
+    // 1000 JPY за заказ на 1000 USD.
     $order->markPaid();
 }
 ```
+
+Частичный capture (700 из 1200) оставляет платёж `Succeeded` с `amount` 1200 и
+`capturedAmount` 700, поэтому заказ остаётся неоплаченным. Исполняемая версия
+этого рецепта на фейках — `examples/reconcile-partial-capture.php` в
+`rasuvaeff/payments-testing`.
 
 ## Реализация хранилища событий
 
@@ -332,8 +346,11 @@ use Rasuvaeff\PaymentsTesting\FakeGatewayConfig;
 use Rasuvaeff\PaymentsTesting\FakePaymentGateway;
 use Rasuvaeff\PaymentsTesting\PaymentGatewayAssertions;
 
-// Детерминированный исход задаётся FakeGatewayConfig::createState
-$succeeding = new FakePaymentGateway();   // конфиг по умолчанию: PaymentState::Succeeded
+// Без закреплённого createState начальное состояние следует из запроса, как
+// отвечает провайдер: RequiresPaymentMethod без paymentMethod, Pending при
+// ручном подтверждении, RequiresCapture при ручном capture, иначе Succeeded.
+// FakeGatewayConfig::createState закрепляет один исход для каждого create.
+$succeeding = new FakePaymentGateway();   // в $request есть paymentMethod: Succeeded
 $failing = new FakePaymentGateway(new FakeGatewayConfig(createState: PaymentState::Failed));
 
 $attempt = $succeeding->createPayment($request);

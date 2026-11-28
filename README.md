@@ -49,10 +49,12 @@ Arithmetic requires matching currencies and throws `\OverflowException` instead
 of wrapping. `multiply()` takes an integer numerator/denominator, so percentage
 math never touches floating point.
 
-Use `equals()` when reconciliation compares the authoritative provider amount
-against the order. It compares the currency too: `$attempt->amount->minorUnits
-=== $order->total` accepts 1000 JPY for a 1000 USD order, and that is the half
-that gets forgotten when the comparison is hand-rolled.
+Use `equals()` when reconciliation compares what the provider collected
+against the order — `$attempt->capturedAmount`, not `$attempt->amount` (see
+"Two amounts" below; the cookbook has the full recipe, including a `null`
+captured amount). It compares the currency too: `$collected->minorUnits ===
+$order->total` accepts 1000 JPY for a 1000 USD order, and that is the half that
+gets forgotten when the comparison is hand-rolled.
 
 | Value object | Meaning |
 |---|---|
@@ -156,6 +158,7 @@ it maps a response. Known cases:
 |---|---|---|---|
 | Stripe | ISK, UGX | two-decimal (`500` charges 5 ISK); ISO exponent 0 | multiply by 100 on the way out, divide on the way back |
 | Stripe | BHD, JOD, KWD, OMR, TND | three-decimal, last digit must be `0` | refuse an amount not divisible by 10 |
+| Stripe | MGA | zero-decimal (`500` charges 500 MGA); ISO exponent 2 | refuse an amount not divisible by 100, send `minorUnits / 100`, multiply by 100 on the way back |
 | PayPal | HUF, TWD | zero-decimal value; ISO exponent 2 | refuse an amount not divisible by 100, send `minorUnits / 100` |
 
 The table lists the cases found by the 2026-11-28 review; check the provider's
@@ -169,14 +172,19 @@ matters, validate the order total before creating a payment.
 **Two amounts: created and captured.** `PaymentAttempt::$amount` is the amount
 the payment was created for, as the provider reports it; for an authorization
 that is the authorized amount, and a capture does not change it.
-`PaymentAttempt::$capturedAmount` is the total the provider has taken so far:
+`PaymentAttempt::$capturedAmount` is the **gross** amount the provider has
+captured so far:
 
 | `capturedAmount` | Meaning |
 |---|---|
 | `null` | the response does not say (the adapter has nothing to map) |
-| zero | nothing captured yet — an authorization in `RequiresCapture`, an unpaid payment |
+| zero | no money captured yet — an authorization in `RequiresCapture`, a capture the provider still holds as pending, an unpaid payment |
 | equal to `amount` | an automatic or full capture succeeded |
 | less than `amount` | a partial capture; the rest of the authorization is released or still capturable, per provider |
+
+Refunds never reduce it: a refunded payment still reports what was captured,
+as Stripe's `amount_received` does, and refunds are tracked through
+`RefundAttempt`. So zero means "not captured", never "captured and refunded".
 
 Reconcile what was collected against `capturedAmount`, not `amount`: after a
 partial capture `$attempt->amount->equals($order->total)` is still true. The
@@ -186,8 +194,9 @@ authoritative. Adapters map it from the response:
 
 | Provider | `amount` | `capturedAmount` |
 |---|---|---|
-| Stripe PaymentIntent | `amount` | `amount_received` (`amount_capturable` is what is still capturable, not captured) |
-| PayPal order | `purchase_units[0].amount` | sum of `purchase_units[0].payments.captures[].amount` with status `COMPLETED`; zero when there are none; on a capture response, the captured amount it returns |
+| Stripe PaymentIntent | `amount` | `amount_received`, which a refund does not reduce (`amount_capturable` is what is still capturable, not captured) |
+| PayPal order | `purchase_units[0].amount` | sum of `purchase_units[0].payments.captures[].amount` with status `COMPLETED`, `PARTIALLY_REFUNDED` or `REFUNDED`, at the captured amount (refunds are not subtracted); a `PENDING`, `DECLINED`, `DENIED` or `FAILED` capture counts zero; zero when there are none |
+| PayPal capture | the capture's `amount` | the same rule for the one capture: `COMPLETED`, `PARTIALLY_REFUNDED`, `REFUNDED` → its amount; `PENDING`, `DECLINED`, `DENIED`, `FAILED` → zero; an undocumented status → `null` |
 
 An adapter that cannot read the captured amount from a response leaves it
 `null` rather than guessing from the state.

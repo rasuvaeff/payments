@@ -11,9 +11,10 @@ use Rasuvaeff\Payments\Internal\Assert;
  *
  * `amount` is the amount the payment was created for — for an authorization,
  * the authorized amount — and does not change when the payment is captured.
- * `capturedAmount` is the total the provider has taken so far: `null` when
- * the response does not say, zero before a capture, the full amount once an
- * automatic or full capture succeeded, less after a partial capture. It may
+ * `capturedAmount` is the gross amount the provider has captured so far:
+ * `null` when the response does not say, zero before a capture or while a
+ * capture is pending, the full amount once an automatic or full capture
+ * succeeded, less after a partial capture. Refunds never reduce it. It may
  * exceed `amount` where the provider supports overcapture; the provider is
  * authoritative. Reconcile what was collected against `capturedAmount`.
  *
