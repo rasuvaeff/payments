@@ -43,6 +43,10 @@ final readonly class WebhookInput
     }
 
     /**
+     * Names are lowercased. An all-digit name such as `123` (or `-1`) is an
+     * `int` key: PHP stores the string key `"123"` as an integer, so cast
+     * the key with `(string)` before passing it to a `string` parameter.
+     *
      * @return HeaderMap
      */
     public function headers(): array
@@ -75,7 +79,7 @@ final readonly class WebhookInput
         $headers = $this->headers;
 
         foreach (array_keys($headers) as $name) {
-            if ($this->isSensitiveName(name: $name)) {
+            if ($this->isSensitiveName(name: (string) $name)) {
                 $headers[$name] = [self::REDACTED];
             }
         }

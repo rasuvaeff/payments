@@ -469,7 +469,9 @@ handling an unknown outcome.
 `WebhookInput::header()` requires a non-empty header name. Header names given
 to `WebhookInput` must be RFC 9110 tokens (letters, digits and
 ``!#$%&'*+-.^_`|~``); an all-digit name that PHP turned into an int array key
-is accepted as its string. Anything else throws `\InvalidArgumentException`,
+is accepted as its string. It stays an int key in `headers()` and
+`sanitizedHeaders()` (PHP cannot hold `"123"` as a string key), so cast the key
+with `(string)` before passing it on as a name. Anything else throws `\InvalidArgumentException`,
 which `WebhookController` answers like any processing exception — 503
 `processing_failed`, logged. A PSR-7 request cannot carry such a name, so from
 the controller this only fires on a broken message implementation.

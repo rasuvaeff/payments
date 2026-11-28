@@ -100,10 +100,11 @@ final class WebhookInputTest
     /**
      * RFC 9110 field names are tokens: `tchar` is ALPHA, DIGIT and
      * ``!#$%&'*+-.^_`|~``. A load balancer or CDN adding such a header to
-     * every request must not turn each delivery into a 503.
+     * every request must not turn each delivery into a 503, and the audit
+     * copy from `sanitizedHeaders()` must work for every name accepted.
      *
      * @param array<array-key, string> $headers
-     * @param array<string, list<string>> $expected
+     * @param array<array-key, list<string>> $expected
      */
     #[DataProvider('tokenHeaderNameProvider')]
     public function acceptsEveryRfc9110TokenHeaderName(array $headers, array $expected): void
@@ -115,10 +116,28 @@ final class WebhookInputTest
         );
 
         Assert::same($input->headers(), $expected);
+        Assert::same($input->sanitizedHeaders(), $expected);
     }
 
     /**
-     * @return iterable<string, array{array<array-key, string>, array<string, list<string>>}>
+     * An all-digit name is an int key in `headers()`; redaction still
+     * matches it by name.
+     */
+    public function sanitizesNumericHeaderNames(): void
+    {
+        $input = new WebhookInput(
+            rawBody: '{}',
+            provider: new PaymentProvider(value: 'fixture'),
+            headers: ['123' => 'a', '-1' => 'b', 'Stripe-Signature' => 'secret'],
+        );
+
+        Assert::same($input->sanitizedHeaders(), [123 => ['a'], -1 => ['b'], 'stripe-signature' => ['[REDACTED]']]);
+        Assert::same($input->header('123'), ['a']);
+        Assert::same($input->header('-1'), ['b']);
+    }
+
+    /**
+     * @return iterable<string, array{array<array-key, string>, array<array-key, list<string>>}>
      */
     public static function tokenHeaderNameProvider(): iterable
     {
@@ -128,6 +147,7 @@ final class WebhookInputTest
         // PHP turns the array key "123" into int 123; PSR-7 getHeaders() hands it over that way.
         yield 'digits only' => [['123' => 'a'], ['123' => ['a']]];
         yield 'int key' => [[5 => 'a'], ['5' => ['a']]];
+        yield 'negative digits' => [['-1' => 'a'], ['-1' => ['a']]];
     }
 
     #[DataProvider('invalidInputProvider')]

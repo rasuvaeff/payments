@@ -11,7 +11,7 @@ namespace Rasuvaeff\Payments\Internal;
  *
  * @psalm-type ScalarMap = array<non-empty-string, scalar|null>
  * @psalm-type NonEmptyId = non-empty-string
- * @psalm-type HeaderMap = array<non-empty-string, list<string>>
+ * @psalm-type HeaderMap = array<int|non-empty-string, list<string>>
  * @psalm-type AuthHeaderMap = array<non-empty-string, non-empty-string>
  * @psalm-type RequestMetadata = array<non-empty-string, scalar|null>
  */
